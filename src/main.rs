@@ -1,4 +1,5 @@
 mod error;
+mod http;
 mod import;
 mod index;
 mod mcp;

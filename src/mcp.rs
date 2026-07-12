@@ -336,15 +336,22 @@ pub fn serve_stdio(svc: Ecphory) -> anyhow::Result<()> {
     })
 }
 
-/// Serve MCP over streamable HTTP: one daemon owns the store lock, any
-/// number of client sessions connect concurrently. This is the fix for the
-/// M4 gate finding (stdio-per-session collides on redb's exclusive lock).
+/// Serve MCP over streamable HTTP + the REST mirror: one daemon owns the
+/// store lock, any number of client sessions connect concurrently. This is
+/// the fix for the M4 gate finding (stdio-per-session collides on redb's
+/// exclusive lock).
 pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
     let shared = Arc::new(Mutex::new(svc));
+    let token = std::env::var("ECPHORY_AUTH_TOKEN").ok().filter(|t| !t.is_empty());
+    if token.is_some() {
+        tracing::info!("bearer auth enabled (ECPHORY_AUTH_TOKEN)");
+    }
+    let state = Arc::new(crate::http::AppState { svc: shared.clone(), token });
+
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         // Plain JSON request/response (MCP streamable HTTP, 2025-06-18):
@@ -363,14 +370,21 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
         // (anthropics/claude-code#30426), which strict streamable-HTTP
         // servers 406 — the failure is silent client-side ("tools fetch
         // failed"). Be liberal: inject the header on every inbound request.
-        let router = axum::Router::new().nest_service("/mcp", service).layer(
-            axum::middleware::map_request(|mut req: axum::http::Request<axum::body::Body>| async {
-                req.headers_mut().insert(
-                    axum::http::header::ACCEPT,
-                    axum::http::HeaderValue::from_static("application/json, text/event-stream"),
-                );
-                req
-            }),
+        let router = crate::http::build_router(state).nest_service(
+            "/mcp",
+            axum::Router::new().fallback_service(service).layer(
+                axum::middleware::map_request(
+                    |mut req: axum::http::Request<axum::body::Body>| async {
+                        req.headers_mut().insert(
+                            axum::http::header::ACCEPT,
+                            axum::http::HeaderValue::from_static(
+                                "application/json, text/event-stream",
+                            ),
+                        );
+                        req
+                    },
+                ),
+            ),
         );
         // Loopback only: single-user local daemon, no remote surface.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
