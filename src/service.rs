@@ -149,15 +149,11 @@ impl Ecphory {
             if ep.expired_at.is_some_and(|t| t <= now) {
                 continue;
             }
-            if let Some(g) = &opts.group_id {
-                if &ep.group_id != g {
-                    continue;
-                }
+            if opts.group_id.as_ref().is_some_and(|g| &ep.group_id != g) {
+                continue;
             }
-            if let Some(s) = &opts.source {
-                if &ep.source != s {
-                    continue;
-                }
+            if opts.source.as_ref().is_some_and(|s| &ep.source != s) {
+                continue;
             }
             if !opts.tags.iter().all(|t| ep.tags.contains(t)) {
                 continue;
