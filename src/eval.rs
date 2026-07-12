@@ -317,10 +317,10 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
                 s.ts <= access.ts && (access.ts - s.ts).num_seconds() <= window_secs
             })
             .max_by_key(|s| s.ts);
-        if let Some(search) = candidate {
-            if seen.insert((search.query.clone(), access.episode_id.clone())) {
-                labeled.push((search, access));
-            }
+        if let Some(search) = candidate
+            && seen.insert((search.query.clone(), access.episode_id.clone()))
+        {
+            labeled.push((search, access));
         }
     }
 
