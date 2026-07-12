@@ -1,0 +1,60 @@
+# Release automation: on every push to main, release-plz maintains a
+# release PR (version bump + changelog). Merging that PR makes release-plz
+# push the vX.Y.Z tag, which triggers release.yml (dist) to build all
+# platform artifacts and create the GitHub Release.
+#
+# RELEASE_PLZ_TOKEN must be a PAT (or GitHub App token) — tags pushed with
+# the default GITHUB_TOKEN cannot trigger release.yml. Fine-grained PAT
+# scope: this repo, contents:write + pull-requests:write.
+name: release-plz
+
+permissions:
+  pull-requests: write
+  contents: write
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-plz-release:
+    name: release-plz release
+    runs-on: ubuntu-24.04
+    if: ${{ github.repository_owner == 'JaysonRawlins' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+  release-plz-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-24.04
+    if: ${{ github.repository_owner == 'JaysonRawlins' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

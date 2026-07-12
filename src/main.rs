@@ -162,9 +162,18 @@ fn db_path(cli_flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     }
     // Absolute default or fail-fast. Deliberately NOT ./ecphory.redb: a
     // cwd-relative fallback once split-brained a production memory store.
-    let home = std::env::var("HOME")
-        .map_err(|_| anyhow::anyhow!("set --db, $ECPHORY_DB, or $HOME"))?;
-    Ok(PathBuf::from(home).join(".local/share/ecphory/ecphory.redb"))
+    #[cfg(windows)]
+    {
+        let base = std::env::var("LOCALAPPDATA")
+            .map_err(|_| anyhow::anyhow!("set --db, %ECPHORY_DB%, or %LOCALAPPDATA%"))?;
+        Ok(PathBuf::from(base).join("ecphory").join("ecphory.redb"))
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME")
+            .map_err(|_| anyhow::anyhow!("set --db, $ECPHORY_DB, or $HOME"))?;
+        Ok(PathBuf::from(home).join(".local/share/ecphory/ecphory.redb"))
+    }
 }
 
 fn main() -> anyhow::Result<()> {

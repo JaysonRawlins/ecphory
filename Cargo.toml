@@ -1,7 +1,13 @@
 [package]
 name = "ecphory"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
+description = "Recall, measured. A single-binary, lexical-first memory store for AI agents."
+license = "MIT"
+repository = "https://github.com/JaysonRawlins/ecphory"
+homepage = "https://github.com/JaysonRawlins/ecphory"
+keywords = ["memory", "mcp", "bm25", "agent", "search"]
+categories = ["command-line-utilities", "database-implementations"]
 
 [dependencies]
 anyhow = "1.0.103"
@@ -23,3 +29,8 @@ uuid = { version = "1.23.4", features = ["v7", "serde"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
