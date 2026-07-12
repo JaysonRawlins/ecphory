@@ -1,5 +1,8 @@
 mod error;
+mod import;
+mod index;
 mod model;
+mod service;
 mod store;
 
 use std::path::PathBuf;
@@ -7,7 +10,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::model::{Episode, UpdateParams};
-use crate::store::{ListOptions, Store};
+use crate::service::{Ecphory, SearchOptions};
+use crate::store::ListOptions;
 
 /// ecphory — recall, measured. A lexical-first memory store for AI agents.
 #[derive(Parser)]
@@ -39,6 +43,23 @@ enum Command {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
+    /// BM25 search over content, names, and search phrases
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long)]
+        include_deleted: bool,
+        #[arg(long)]
+        group: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// One-line-per-hit output (id prefix, score, latency, name)
+        #[arg(long)]
+        brief: bool,
+    },
     /// Fetch an episode by id or unique prefix
     Get { id: String },
     /// List episodes, newest first
@@ -66,6 +87,13 @@ enum Command {
     Restore { id: String },
     /// Show the archived version history of an episode
     Versions { id: String },
+    /// Import episodes from an engram git-export mirror directory
+    Import {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Rebuild the search index from the store (recovery / schema change)
+    Reindex,
     /// Store status
     Status,
 }
@@ -94,7 +122,7 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let store = Store::open(db_path(cli.db)?)?;
+    let mut svc = Ecphory::open(db_path(cli.db)?)?;
 
     match cli.command {
         Command::Add { content, name, source, phrases, tags } => {
@@ -102,15 +130,58 @@ fn main() -> anyhow::Result<()> {
             ep.name = name;
             ep.search_phrases = phrases;
             ep.tags = tags;
-            store.insert(&ep)?;
+            svc.insert(&ep)?;
             println!("{}", serde_json::to_string_pretty(&ep)?);
         }
+        Command::Search { query, limit, include_deleted, group, source, tags, brief } => {
+            let out = svc.search(
+                &query,
+                &SearchOptions { limit, include_deleted, group_id: group, source, tags },
+            )?;
+            if brief {
+                eprintln!(
+                    "{} hits in {:.2}ms",
+                    out.results.len(),
+                    out.latency_us as f64 / 1000.0
+                );
+                for r in &out.results {
+                    let id = r.episode.id.to_string();
+                    println!(
+                        "{:>2}. {}  {:>7.3}  {}",
+                        r.rank,
+                        &id[..8],
+                        r.score,
+                        r.episode.name.as_deref().unwrap_or("(unnamed)")
+                    );
+                }
+            } else {
+                let eps: Vec<_> = out
+                    .results
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "rank": r.rank,
+                            "score": r.score,
+                            "episode": r.episode,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "count": eps.len(),
+                        "latency_ms": out.latency_us as f64 / 1000.0,
+                        "results": eps,
+                    }))?
+                );
+            }
+        }
         Command::Get { id } => {
-            let ep = store.get(&id)?;
+            let ep = svc.get(&id)?;
             println!("{}", serde_json::to_string_pretty(&ep)?);
         }
         Command::List { limit, include_deleted } => {
-            let eps = store.list(ListOptions { limit, include_deleted, ..Default::default() })?;
+            let eps = svc.list(ListOptions { limit, include_deleted, ..Default::default() })?;
             println!("{}", serde_json::to_string_pretty(&eps)?);
         }
         Command::Update { id, content, name, phrases, tags } => {
@@ -121,23 +192,42 @@ fn main() -> anyhow::Result<()> {
                 tags: if tags.is_empty() { None } else { Some(tags) },
                 ..Default::default()
             };
-            let ep = store.update(&id, params)?;
+            let ep = svc.update(&id, params)?;
             println!("{}", serde_json::to_string_pretty(&ep)?);
         }
         Command::Demote { id } => {
-            let ep = store.demote(&id)?;
+            let ep = svc.demote(&id)?;
             println!("demoted {} (recoverable via restore)", ep.id);
         }
         Command::Restore { id } => {
-            let ep = store.restore(&id)?;
+            let ep = svc.restore(&id)?;
             println!("restored {}", ep.id);
         }
         Command::Versions { id } => {
-            let versions = store.versions(&id)?;
+            let versions = svc.versions(&id)?;
             println!("{}", serde_json::to_string_pretty(&versions)?);
         }
+        Command::Import { dir } => {
+            let started = std::time::Instant::now();
+            let read = import::read_mirror(&dir)?;
+            let parsed = read.episodes.len();
+            let inserted = svc.import(read.episodes)?;
+            println!(
+                "parsed {parsed} episodes, imported {inserted} new ({} already present) in {:.1}s",
+                parsed - inserted,
+                started.elapsed().as_secs_f64()
+            );
+            for (path, reason) in &read.skipped {
+                eprintln!("skipped {path}: {reason}");
+            }
+        }
+        Command::Reindex => {
+            let started = std::time::Instant::now();
+            let n = svc.reindex()?;
+            println!("reindexed {n} episodes in {:.2}s", started.elapsed().as_secs_f64());
+        }
         Command::Status => {
-            println!("episodes: {}", store.count()?);
+            println!("episodes: {}", svc.count()?);
         }
     }
     Ok(())
