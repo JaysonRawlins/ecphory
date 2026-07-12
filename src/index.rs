@@ -2,7 +2,10 @@ use std::path::Path;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, TantivyDocument, Value, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value,
+    STORED, STRING,
+};
 use tantivy::{Index, IndexWriter, Term};
 
 use crate::error::{Error, Result};
@@ -29,13 +32,24 @@ pub struct Hit {
 }
 
 fn schema() -> Schema {
+    // English stemming on all text fields: DuckDB's FTS stems and tantivy's
+    // default tokenizer doesn't — the first dogfood divergence (2026-07-11)
+    // was morphological variants under-matching. Queries stem too (the
+    // QueryParser uses the field's tokenizer).
+    let stemmed = || {
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("en_stem")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        )
+    };
     let mut b = Schema::builder();
     b.add_text_field("id", STRING | STORED);
-    b.add_text_field("name", TEXT);
-    b.add_text_field("content", TEXT);
+    b.add_text_field("name", stemmed());
+    b.add_text_field("content", stemmed());
     // Write-time paraphrase cues get their own field so they can be boosted:
     // a match on how-you'd-ask-for-it should outrank an incidental body match.
-    b.add_text_field("phrases", TEXT);
+    b.add_text_field("phrases", stemmed());
     b.add_text_field("deleted", STRING);
     b.build()
 }
@@ -45,10 +59,25 @@ impl SearchIndex {
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::Storage(format!("creating index dir: {e}")))?;
         let schema = schema();
-        let dir = tantivy::directory::MmapDirectory::open(&dir)
+        let mmap = tantivy::directory::MmapDirectory::open(&dir)
             .map_err(|e| Error::Storage(format!("opening index dir: {e}")))?;
-        let index = Index::open_or_create(dir, schema.clone())
-            .map_err(|e| Error::Storage(format!("opening index: {e}")))?;
+        // Self-healing on schema change: the index is derived data, so a
+        // mismatch (e.g. tokenizer upgrade) wipes and rebuilds instead of
+        // migrating. The store is the source of truth; the service layer
+        // reindexes when it finds an empty index over a non-empty store.
+        let index = match Index::open_or_create(mmap, schema.clone()) {
+            Ok(index) => index,
+            Err(open_err) => {
+                tracing::warn!("index schema mismatch ({open_err}); wiping derived index for rebuild");
+                std::fs::remove_dir_all(&dir)
+                    .and_then(|_| std::fs::create_dir_all(&dir))
+                    .map_err(|e| Error::Storage(format!("resetting index dir: {e}")))?;
+                let mmap = tantivy::directory::MmapDirectory::open(&dir)
+                    .map_err(|e| Error::Storage(format!("reopening index dir: {e}")))?;
+                Index::open_or_create(mmap, schema.clone())
+                    .map_err(|e| Error::Storage(format!("recreating index: {e}")))?
+            }
+        };
         let writer = index
             .writer(50_000_000)
             .map_err(|e| Error::Storage(format!("creating index writer: {e}")))?;

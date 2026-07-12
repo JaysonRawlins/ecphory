@@ -288,6 +288,16 @@ mod tests {
     }
 
     #[test]
+    fn stemming_matches_morphological_variants() {
+        // First dogfood divergence: DuckDB FTS stems, tantivy default
+        // didn't, so "finding memories" missed "finds the memory".
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("the session finds the memory quickly and saves it")).unwrap();
+        let out = svc.search("finding saved memories", &SearchOptions::default()).unwrap();
+        assert_eq!(out.results.len(), 1, "stemmed variants should match");
+    }
+
+    #[test]
     fn numeric_tokens_are_searchable() {
         // engram needed an ILIKE fallback because DuckDB FTS can't index pure
         // numeric tokens; tantivy must not share that gap.
