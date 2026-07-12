@@ -1,6 +1,7 @@
 mod error;
 mod import;
 mod index;
+mod mcp;
 mod model;
 mod recorder;
 mod service;
@@ -108,6 +109,14 @@ enum Command {
     AccessLog {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Serve MCP over stdio (single client; prefer `serve` for shared use)
+    Mcp,
+    /// Serve MCP over streamable HTTP on localhost — one daemon, many sessions
+    Serve {
+        /// Port (or $ECPHORY_PORT; default 3491)
+        #[arg(long)]
+        port: Option<u16>,
     },
 }
 
@@ -261,6 +270,15 @@ fn main() -> anyhow::Result<()> {
             for e in svc.recent_accesses(limit)? {
                 println!("{}  {}", e.ts.format("%Y-%m-%d %H:%M:%S"), e.episode_id);
             }
+        }
+        Command::Mcp => {
+            mcp::serve_stdio(svc)?;
+        }
+        Command::Serve { port } => {
+            let port = port
+                .or_else(|| std::env::var("ECPHORY_PORT").ok().and_then(|p| p.parse().ok()))
+                .unwrap_or(3491);
+            mcp::serve_http(svc, port)?;
         }
     }
     Ok(())
