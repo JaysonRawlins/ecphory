@@ -2,6 +2,7 @@ mod error;
 mod import;
 mod index;
 mod model;
+mod recorder;
 mod service;
 mod store;
 
@@ -96,6 +97,18 @@ enum Command {
     Reindex,
     /// Store status
     Status,
+    /// Flight-recorder aggregates: query counts, zero-hit rate, latency percentiles
+    Stats,
+    /// Recent recorded searches, newest first
+    SearchLog {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Recent recorded episode fetches (the used-signal), newest first
+    AccessLog {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 fn db_path(cli_flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
@@ -228,6 +241,26 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Status => {
             println!("episodes: {}", svc.count()?);
+        }
+        Command::Stats => {
+            let s = svc.stats()?;
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        }
+        Command::SearchLog { limit } => {
+            for e in svc.recent_searches(limit)? {
+                println!(
+                    "{}  {:>7.2}ms  {:>3} hits  {:?}",
+                    e.ts.format("%Y-%m-%d %H:%M:%S"),
+                    e.latency_us as f64 / 1000.0,
+                    e.result_count,
+                    e.query
+                );
+            }
+        }
+        Command::AccessLog { limit } => {
+            for e in svc.recent_accesses(limit)? {
+                println!("{}  {}", e.ts.format("%Y-%m-%d %H:%M:%S"), e.episode_id);
+            }
         }
     }
     Ok(())

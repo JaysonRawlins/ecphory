@@ -16,6 +16,10 @@ const EPISODES: TableDefinition<&str, &[u8]> = TableDefinition::new("episodes");
 /// Key: "{episode_id}/{archived_at_rfc3339}/{version_id}" — range-scannable
 /// by episode, chronologically ordered within one.
 const VERSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("episode_versions");
+/// Flight recorder tables. Keys are UUIDv7 strings → time-ordered, so
+/// retention pruning and newest-first reads are plain range scans.
+const SEARCH_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("search_log");
+const ACCESS_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("access_log");
 
 pub struct Store {
     db: Database,
@@ -41,6 +45,8 @@ impl Store {
         {
             tx.open_table(EPISODES)?;
             tx.open_table(VERSIONS)?;
+            tx.open_table(SEARCH_LOG)?;
+            tx.open_table(ACCESS_LOG)?;
         }
         tx.commit()?;
         Ok(Self { db })
@@ -233,6 +239,102 @@ impl Store {
         };
         tx.commit()?;
         Ok(updated)
+    }
+}
+
+// ---- flight recorder persistence -------------------------------------------
+//
+// Write paths never fail the caller: the recorder is diagnostics, and a
+// search that succeeded must not error because its log write didn't.
+
+impl Store {
+    pub fn log_search(&self, entry: &crate::recorder::SearchLogEntry) {
+        if let Err(e) = self.try_log(SEARCH_LOG, &entry.id.to_string(), entry) {
+            tracing::warn!("search log write failed: {e}");
+        }
+    }
+
+    pub fn log_access(&self, entry: &crate::recorder::AccessLogEntry) {
+        if let Err(e) = self.try_log(ACCESS_LOG, &entry.id.to_string(), entry) {
+            tracing::warn!("access log write failed: {e}");
+        }
+    }
+
+    fn try_log<T: serde::Serialize>(
+        &self,
+        table: TableDefinition<&str, &[u8]>,
+        key: &str,
+        value: &T,
+    ) -> Result<()> {
+        let bytes = serde_json::to_vec(value)?;
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(table)?;
+            t.insert(key, bytes.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Newest-first search log entries.
+    pub fn recent_searches(&self, limit: usize) -> Result<Vec<crate::recorder::SearchLogEntry>> {
+        self.read_log(SEARCH_LOG, limit)
+    }
+
+    /// Newest-first access log entries.
+    pub fn recent_accesses(&self, limit: usize) -> Result<Vec<crate::recorder::AccessLogEntry>> {
+        self.read_log(ACCESS_LOG, limit)
+    }
+
+    fn read_log<T: serde::de::DeserializeOwned>(
+        &self,
+        table: TableDefinition<&str, &[u8]>,
+        limit: usize,
+    ) -> Result<Vec<T>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(table)?;
+        let mut out = Vec::new();
+        for entry in t.iter()?.rev() {
+            let (_, value) = entry?;
+            out.push(serde_json::from_slice(value.value())?);
+            if limit > 0 && out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete recorder entries older than the cutoff. Returns entries removed.
+    pub fn prune_logs(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        let mut removed = 0;
+        for table in [SEARCH_LOG, ACCESS_LOG] {
+            let tx = self.db.begin_write()?;
+            {
+                let mut t = tx.open_table(table)?;
+                // UUIDv7 keys are time-ordered, but comparing the recorded ts
+                // is simpler than synthesizing a boundary key, and log sizes
+                // here make a scan irrelevant.
+                let stale: Vec<String> = t
+                    .iter()?
+                    .filter_map(|e| e.ok())
+                    .filter_map(|(k, v)| {
+                        let ts = serde_json::from_slice::<serde_json::Value>(v.value())
+                            .ok()?
+                            .get("ts")?
+                            .as_str()?
+                            .parse::<chrono::DateTime<chrono::Utc>>()
+                            .ok()?;
+                        (ts < cutoff).then(|| k.value().to_string())
+                    })
+                    .collect();
+                for key in stale {
+                    t.remove(key.as_str())?;
+                    removed += 1;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(removed)
     }
 }
 

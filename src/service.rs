@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::error::Result;
 use crate::index::{Hit, SearchIndex};
 use crate::model::{Episode, UpdateParams};
+use crate::recorder::{self, AccessLogEntry, LoggedHit, RecorderStats, SearchLogEntry};
 use crate::store::{ListOptions, Store};
 
 /// Store + index, kept in sync. All writes go through here so the index can
@@ -12,6 +13,7 @@ use crate::store::{ListOptions, Store};
 pub struct Ecphory {
     store: Store,
     index: SearchIndex,
+    recording: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -39,6 +41,12 @@ pub struct SearchOutcome {
 impl Ecphory {
     /// The index lives beside the database file: <db_dir>/index/.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(db_path, recorder::recording_enabled())
+    }
+
+    /// Open with an explicit recorder switch (tests; embedders that manage
+    /// their own config). `open` reads ECPHORY_SEARCH_LOG.
+    pub fn open_with(db_path: impl AsRef<Path>, recording: bool) -> Result<Self> {
         let store = Store::open(&db_path)?;
         let index_dir: PathBuf = db_path
             .as_ref()
@@ -53,7 +61,14 @@ impl Ecphory {
         if store.count()? > 0 && index.search("*", 1, true)?.is_empty() {
             index.rebuild(store.list(ListOptions { include_deleted: true, include_expired: true, limit: 0 })?.iter())?;
         }
-        Ok(Self { store, index })
+
+        // Recorder maintenance at open: prune past retention. Never fatal.
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(recorder::retention_days());
+        if let Err(e) = store.prune_logs(cutoff) {
+            tracing::warn!("recorder prune failed: {e}");
+        }
+
+        Ok(Self { store, index, recording })
     }
 
     pub fn insert(&mut self, ep: &Episode) -> Result<()> {
@@ -78,8 +93,18 @@ impl Ecphory {
         Ok(inserted)
     }
 
+    /// Fetch by id/prefix — the used-signal. Logs the CANONICAL id (post
+    /// prefix-resolution) so the search-log join never misses on notation.
     pub fn get(&self, id: &str) -> Result<Episode> {
-        self.store.get(id)
+        let ep = self.store.get(id)?;
+        if self.recording {
+            self.store.log_access(&AccessLogEntry {
+                id: uuid::Uuid::now_v7(),
+                ts: chrono::Utc::now(),
+                episode_id: ep.id.to_string(),
+            });
+        }
+        Ok(ep)
     }
 
     pub fn list(&self, opts: ListOptions) -> Result<Vec<Episode>> {
@@ -165,7 +190,49 @@ impl Ecphory {
             }
         }
 
-        Ok(SearchOutcome { results, latency_us: started.elapsed().as_micros() })
+        let outcome = SearchOutcome { results, latency_us: started.elapsed().as_micros() };
+
+        // Record the search. Empty queries are browses, not retrieval events;
+        // logging them would drown the workload signal.
+        if self.recording && !query.trim().is_empty() {
+            self.store.log_search(&SearchLogEntry {
+                id: uuid::Uuid::now_v7(),
+                ts: chrono::Utc::now(),
+                query: query.to_string(),
+                limit,
+                include_deleted: opts.include_deleted,
+                group_id: opts.group_id.clone(),
+                source: opts.source.clone(),
+                tags: opts.tags.clone(),
+                result_count: outcome.results.len(),
+                results: outcome
+                    .results
+                    .iter()
+                    .map(|r| LoggedHit {
+                        id: r.episode.id.to_string(),
+                        rank: r.rank,
+                        score: r.score,
+                    })
+                    .collect(),
+                latency_us: outcome.latency_us as u64,
+            });
+        }
+
+        Ok(outcome)
+    }
+
+    pub fn recent_searches(&self, limit: usize) -> Result<Vec<SearchLogEntry>> {
+        self.store.recent_searches(limit)
+    }
+
+    pub fn recent_accesses(&self, limit: usize) -> Result<Vec<AccessLogEntry>> {
+        self.store.recent_accesses(limit)
+    }
+
+    pub fn stats(&self) -> Result<RecorderStats> {
+        let searches = self.store.recent_searches(0)?;
+        let accesses = self.store.recent_accesses(0)?;
+        Ok(recorder::compute_stats(&searches, accesses.len()))
     }
 }
 
@@ -288,6 +355,75 @@ mod tests {
             .unwrap();
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].episode.id, b.id);
+    }
+
+    #[test]
+    fn recorder_logs_search_and_access() {
+        let (mut svc, _d) = temp();
+        let e = ep("recorder target about axolotls");
+        svc.insert(&e).unwrap();
+
+        let out = svc.search("axolotls", &SearchOptions::default()).unwrap();
+        assert_eq!(out.results.len(), 1);
+        let _ = svc.get(&e.id.to_string()[..13]).unwrap();
+
+        let searches = svc.recent_searches(10).unwrap();
+        assert_eq!(searches.len(), 1);
+        let s = &searches[0];
+        assert_eq!(s.query, "axolotls");
+        assert_eq!(s.result_count, 1);
+        assert_eq!(s.results[0].id, e.id.to_string());
+        assert_eq!(s.results[0].rank, 1);
+        assert!(s.latency_us > 0);
+
+        // Access logged with the canonical id despite the prefix fetch.
+        let accesses = svc.recent_accesses(10).unwrap();
+        assert_eq!(accesses.len(), 1);
+        assert_eq!(accesses[0].episode_id, e.id.to_string());
+
+        // Joins inside search() must not pollute the access log.
+        svc.search("axolotls", &SearchOptions::default()).unwrap();
+        assert_eq!(svc.recent_accesses(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recorder_skips_empty_query() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("anything")).unwrap();
+        svc.search("   ", &SearchOptions::default()).unwrap();
+        assert!(svc.recent_searches(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recorder_opt_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut svc = Ecphory::open_with(dir.path().join("optout.redb"), false).unwrap();
+
+        let e = ep("silent running");
+        svc.insert(&e).unwrap();
+        svc.search("silent", &SearchOptions::default()).unwrap();
+        svc.get(&e.id.to_string()).unwrap();
+        assert!(svc.recent_searches(10).unwrap().is_empty());
+        assert!(svc.recent_accesses(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recorder_stats_percentiles_and_zero_hits() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("stats fodder about capybaras")).unwrap();
+        for _ in 0..4 {
+            svc.search("capybaras", &SearchOptions::default()).unwrap();
+        }
+        svc.search("no such thing anywhere", &SearchOptions::default()).unwrap();
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.searches, 5);
+        assert_eq!(s.unique_queries, 2);
+        assert_eq!(s.zero_hit, 1);
+        assert!(s.latency_us_p50 > 0);
+        assert!(s.latency_us_max >= s.latency_us_p99);
+        assert_eq!(s.top_queries[0].0, "capybaras");
+        assert_eq!(s.top_queries[0].1, 4);
     }
 
     #[test]
