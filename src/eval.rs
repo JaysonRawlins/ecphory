@@ -273,7 +273,7 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
     if !misses.is_empty() {
         println!("misses ({}):", misses.len());
         for (pair, bucket) in &misses {
-            println!("  [{bucket}] {:?} -> {}", pair.query, &pair.id);
+            println!("  [{bucket}] {:?} -> {}", pair.query, pair.id);
         }
     }
 
