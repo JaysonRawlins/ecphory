@@ -1,4 +1,5 @@
 mod error;
+mod eval;
 mod http;
 mod import;
 mod index;
@@ -119,6 +120,27 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Score retrieval quality against the LIVE daemon (HTTP; no lock contention)
+    Eval {
+        /// Gold set: JSONL of {"query": ..., "id": ...} (id may be a prefix)
+        #[arg(long)]
+        gold: Option<std::path::PathBuf>,
+        /// Evaluate from the flight recorder: joins fetches to preceding
+        /// searches (used-signal) and reports taped vs replayed ranks
+        #[arg(long)]
+        from_log: bool,
+        /// Daemon base URL
+        #[arg(long, default_value = "http://127.0.0.1:3491")]
+        url: String,
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+        /// Exit non-zero if overall gold MRR falls below this (drift guard)
+        #[arg(long)]
+        min_mrr: Option<f64>,
+        /// Used-signal join window in seconds
+        #[arg(long, default_value_t = 300)]
+        window: i64,
+    },
 }
 
 fn db_path(cli_flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
@@ -145,6 +167,29 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Eval is HTTP-only by design: it scores the live daemon's real client
+    // path and must never open the store (redb's lock is process-exclusive).
+    if let Command::Eval { gold, from_log, url, k, min_mrr, window } = &cli.command {
+        let token = std::env::var("ECPHORY_AUTH_TOKEN").ok().filter(|t| !t.is_empty());
+        let client = eval::EvalClient::new(url.clone(), token);
+        let mut ok = true;
+        if let Some(gold_path) = gold {
+            let pairs = eval::parse_gold(gold_path)?;
+            ok &= eval::run_gold(&client, &pairs, *k, *min_mrr)?;
+        }
+        if *from_log {
+            ok &= eval::run_from_log(&client, *k, *window)?;
+        }
+        if gold.is_none() && !from_log {
+            anyhow::bail!("eval needs --gold <file> and/or --from-log");
+        }
+        if !ok {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let mut svc = Ecphory::open(db_path(cli.db)?)?;
 
     match cli.command {
@@ -281,6 +326,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(3491);
             mcp::serve_http(svc, port)?;
         }
+        Command::Eval { .. } => unreachable!("handled before store open"),
     }
     Ok(())
 }
