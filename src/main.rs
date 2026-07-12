@@ -1,5 +1,6 @@
 mod error;
 mod eval;
+mod export;
 mod http;
 mod import;
 mod index;
@@ -95,6 +96,15 @@ enum Command {
     Import {
         #[arg(long)]
         dir: PathBuf,
+    },
+    /// Export all episodes to a git mirror (offline; the daemon also
+    /// exports on a schedule when ECPHORY_EXPORT_DIR is set)
+    Export {
+        #[arg(long)]
+        dir: PathBuf,
+        /// Commit the mirror after writing
+        #[arg(long)]
+        commit: bool,
     },
     /// Rebuild the search index from the store (recovery / schema change)
     Reindex,
@@ -288,6 +298,17 @@ fn main() -> anyhow::Result<()> {
             for (path, reason) in &read.skipped {
                 eprintln!("skipped {path}: {reason}");
             }
+        }
+        Command::Export { dir, commit } => {
+            let episodes = svc.export_all()?;
+            let outcome = export::write_mirror(&episodes, &dir)?;
+            let committed = if commit { export::git_commit(&dir, "ecphory export")? } else { false };
+            println!(
+                "exported {} episodes: {} written, {} unchanged, committed={committed}",
+                episodes.len(),
+                outcome.written,
+                outcome.unchanged
+            );
         }
         Command::Reindex => {
             let started = std::time::Instant::now();

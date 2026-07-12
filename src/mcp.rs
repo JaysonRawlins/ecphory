@@ -322,6 +322,24 @@ impl ServerHandler for McpServer {
     }
 }
 
+/// Parse "24h" / "30m" / "90s" / "1d" style intervals.
+fn parse_interval(raw: &str) -> Option<std::time::Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (num, unit) = raw.split_at(raw.len() - 1);
+    let n: u64 = num.parse().ok()?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86400,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(secs.max(60)))
+}
+
 /// Serve MCP over stdio until the client disconnects. Single-client only:
 /// a second process cannot open the store (redb lock). Prefer `serve`.
 pub fn serve_stdio(svc: Ecphory) -> anyhow::Result<()> {
@@ -354,6 +372,51 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
+        // Scheduled git-mirror export (the durability layer): first tick
+        // fires immediately (export at boot), then every interval. The
+        // lock is held only to snapshot episodes, never across file/git IO.
+        if let Ok(dir) = std::env::var("ECPHORY_EXPORT_DIR")
+            && !dir.is_empty()
+        {
+            {
+                let export_svc = state.svc.clone();
+                let interval = parse_interval(
+                    &std::env::var("ECPHORY_EXPORT_INTERVAL").unwrap_or_default(),
+                )
+                .unwrap_or(std::time::Duration::from_secs(24 * 3600));
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(interval);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tick.tick().await;
+                        let episodes = match export_svc.lock().expect("service lock").export_all() {
+                            Ok(eps) => eps,
+                            Err(e) => {
+                                tracing::warn!("scheduled export: snapshot failed: {e}");
+                                continue;
+                            }
+                        };
+                        let path = std::path::PathBuf::from(&dir);
+                        let result = tokio::task::spawn_blocking(move || {
+                            let outcome = crate::export::write_mirror(&episodes, &path)?;
+                            let committed =
+                                crate::export::git_commit(&path, "ecphory scheduled export")?;
+                            Ok::<_, crate::error::Error>((outcome, committed, episodes.len()))
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok((outcome, committed, total))) => tracing::info!(
+                                "scheduled export: {total} episodes, {} written, {} unchanged, committed={committed}",
+                                outcome.written, outcome.unchanged
+                            ),
+                            Ok(Err(e)) => tracing::warn!("scheduled export failed: {e}"),
+                            Err(e) => tracing::warn!("scheduled export task panicked: {e}"),
+                        }
+                    }
+                });
+            }
+        }
+
         // Plain JSON request/response (MCP streamable HTTP, 2025-06-18):
         // no SSE framing, no priming events, no per-session server state.
         // Simple tools need none of it, and Claude Code's health check

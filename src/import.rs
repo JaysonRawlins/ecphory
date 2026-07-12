@@ -73,6 +73,7 @@ fn parse_episode(raw: &str) -> Result<Episode> {
             "embedding" => continue, // lexical-first: vectors not imported
             "id" => ep.id = Uuid::parse_str(&json_str(value)?).map_err(|e| Error::Storage(format!("bad id: {e}")))?,
             "name" => ep.name = Some(json_str(value)?),
+            "search_phrases" => ep.search_phrases = serde_json::from_str(value)?,
             "source" => ep.source = json_str(value)?,
             "source_model" => ep.source_model = Some(json_str(value)?),
             "source_description" => ep.source_description = Some(json_str(value)?),

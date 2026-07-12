@@ -38,6 +38,8 @@ pub fn build_router(state: Shared) -> Router {
         .route("/memory/access-log", get(access_log))
         .route("/memory/stats", get(stats))
         .route("/status", get(status))
+        .route("/admin/import", post(admin_import))
+        .route("/admin/export", post(admin_export))
         .layer(axum::middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()
@@ -205,9 +207,22 @@ async fn list_episodes(State(state): State<Shared>, Query(q): Query<ListQuery>) 
     }
 }
 
-async fn get_episode(State(state): State<Shared>, Path(id): Path<String>) -> Response {
+#[derive(Deserialize)]
+struct GetQuery {
+    /// Bulk-maintenance bypass: skip the access log (reads that are not
+    /// usage signal must not pollute the used-signal join).
+    #[serde(default)]
+    no_record: bool,
+}
+
+async fn get_episode(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<GetQuery>,
+) -> Response {
     let svc = state.svc.lock().expect("service lock");
-    match svc.get(&id) {
+    let result = if q.no_record { svc.get_unrecorded(&id) } else { svc.get(&id) };
+    match result {
         Ok(ep) => Json(ep).into_response(),
         Err(e) => map_err(e),
     }
@@ -304,6 +319,84 @@ async fn stats(State(state): State<Shared>) -> Response {
     let svc = state.svc.lock().expect("service lock");
     match svc.stats() {
         Ok(s) => Json(s).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    /// Absolute path to a mirror directory (engram or ecphory format).
+    dir: String,
+}
+
+/// Delta import through the daemon — no more stop → import → kickstart
+/// dance; the daemon owns the lock, so the daemon does the importing.
+async fn admin_import(State(state): State<Shared>, Json(body): Json<ImportBody>) -> Response {
+    let read = match crate::import::read_mirror(std::path::Path::new(&body.dir)) {
+        Ok(r) => r,
+        Err(e) => return map_err(e),
+    };
+    let parsed = read.episodes.len();
+    let skipped_files = read.skipped.len();
+    let mut svc = state.svc.lock().expect("service lock");
+    match svc.import(read.episodes) {
+        Ok(imported) => Json(json!({
+            "success": true,
+            "parsed": parsed,
+            "imported": imported,
+            "already_present": parsed - imported,
+            "skipped_files": skipped_files,
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExportBody {
+    /// Mirror directory; falls back to ECPHORY_EXPORT_DIR.
+    #[serde(default)]
+    dir: String,
+    #[serde(default)]
+    commit: bool,
+}
+
+async fn admin_export(State(state): State<Shared>, Json(body): Json<ExportBody>) -> Response {
+    let dir = if body.dir.is_empty() {
+        match std::env::var("ECPHORY_EXPORT_DIR") {
+            Ok(d) if !d.is_empty() => d,
+            _ => return err(StatusCode::BAD_REQUEST, "no dir given and ECPHORY_EXPORT_DIR unset"),
+        }
+    } else {
+        body.dir
+    };
+    let episodes = {
+        let svc = state.svc.lock().expect("service lock");
+        match svc.export_all() {
+            Ok(eps) => eps,
+            Err(e) => return map_err(e),
+        }
+    };
+    let path = std::path::Path::new(&dir);
+    match crate::export::write_mirror(&episodes, path) {
+        Ok(outcome) => {
+            let committed = if body.commit {
+                match crate::export::git_commit(path, "ecphory export") {
+                    Ok(c) => c,
+                    Err(e) => return map_err(e),
+                }
+            } else {
+                false
+            };
+            Json(json!({
+                "success": true,
+                "episodes": episodes.len(),
+                "written": outcome.written,
+                "unchanged": outcome.unchanged,
+                "committed": committed,
+            }))
+            .into_response()
+        }
         Err(e) => map_err(e),
     }
 }

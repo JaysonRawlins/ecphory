@@ -107,6 +107,18 @@ impl Ecphory {
         Ok(ep)
     }
 
+    /// Fetch without touching the access log — for bulk maintenance
+    /// (enrichment backfills, sync jobs) whose reads are not usage signal.
+    /// The 691-read backfill pollution taught this lesson.
+    pub fn get_unrecorded(&self, id: &str) -> Result<Episode> {
+        self.store.get(id)
+    }
+
+    /// Every episode, including demoted and expired — the export set.
+    pub fn export_all(&self) -> Result<Vec<Episode>> {
+        self.store.list(ListOptions { include_deleted: true, include_expired: true, limit: 0 })
+    }
+
     pub fn list(&self, opts: ListOptions) -> Result<Vec<Episode>> {
         self.store.list(opts)
     }
