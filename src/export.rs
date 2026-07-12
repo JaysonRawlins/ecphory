@@ -136,7 +136,18 @@ pub fn git_commit(dir: &Path, message: &str) -> Result<bool> {
         return Ok(false); // nothing to commit — mirror already current
     }
 
-    let commit = git(&["commit", "-q", "-m", message])?;
+    // Fixed identity: exports are machine-generated, and the daemon must
+    // be able to commit on hosts with no global git config (CI, containers).
+    let commit = git(&[
+        "-c",
+        "user.name=ecphory",
+        "-c",
+        "user.email=ecphory@localhost",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    ])?;
     if !commit.status.success() {
         return Err(Error::Storage(format!(
             "git commit failed: {}",
