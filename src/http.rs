@@ -340,6 +340,10 @@ struct RateSearchBody {
     rating: String,
     #[serde(default)]
     used_episode_ids: Vec<String>,
+    /// Miss/partial ground truth: episodes that should have surfaced.
+    /// Triggers self-correction (enrich → redo → validate) per target.
+    #[serde(default)]
+    intended_episode_ids: Vec<String>,
     #[serde(default)]
     note: String,
 }
@@ -349,11 +353,12 @@ async fn rate_search(State(state): State<Shared>, Json(body): Json<RateSearchBod
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
     };
-    let svc = state.svc.lock().expect("service lock");
+    let mut svc = state.svc.lock().expect("service lock");
     match svc.rate_search(
         &body.search_id,
         rating,
         body.used_episode_ids,
+        body.intended_episode_ids,
         none_if_empty(body.note),
     ) {
         Ok(entry) => {

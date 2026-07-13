@@ -82,8 +82,49 @@ pub struct RatingLogEntry {
     /// Episode ids (full or prefix) from the results that were actually used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub used_episode_ids: Vec<String>,
+    /// Episodes that SHOULD have surfaced (miss/partial) — explicit ground
+    /// truth for self-correction. Never inferred from access joins: enriching
+    /// a wrongly-guessed target would bury the right one behind it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intended_episode_ids: Vec<String>,
+    /// Self-correction outcomes for this rating (enrich → redo → validate).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrections: Vec<Correction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// One self-correction attempt: on a non-hit rating with a known target,
+/// the missed query is appended to the target's search_phrases (lexical
+/// enrichment — the query IS how this will be asked for again), the search
+/// re-runs, and the outcome records whether that closed the gap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Correction {
+    pub episode_id: String,
+    pub action: CorrectionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_rank: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionAction {
+    /// Target already ranks within k for this query — nothing to fix.
+    AlreadyRanks,
+    /// Phrase appended and the redo validated: target now ranks within k.
+    Enriched,
+    /// Phrase appended but the target STILL ranks outside k — the gap is
+    /// ranking/crowding, not vocabulary. Needs human or ranking-layer work.
+    EnrichedStillLow,
+    /// The query is already a search phrase on the target yet it still
+    /// misses — enrichment can't help; suspect crowding or a search bug.
+    DuplicatePhrase,
+    /// Target already carries the max phrases; not appended. Curation flag.
+    PhraseCapReached,
+    /// The intended id didn't resolve to an episode.
+    TargetNotFound,
 }
 
 /// Aggregates over the recorded workload, for `ecphory stats`.
