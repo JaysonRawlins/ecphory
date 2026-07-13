@@ -1,0 +1,74 @@
+# Release automation: on every push to main, release-plz maintains a
+# release PR (version bump + changelog). Merging that PR makes release-plz
+# push the vX.Y.Z tag, which triggers release.yml (dist) to build all
+# platform artifacts and create the GitHub Release.
+#
+# Auth is the ecphory-release-bot GitHub App (RELEASE_APP_ID /
+# RELEASE_APP_PRIVATE_KEY secrets) — tags pushed with the default
+# GITHUB_TOKEN cannot trigger release.yml; app-minted tokens can.
+name: release-plz
+
+permissions:
+  pull-requests: write
+  contents: write
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-plz-release:
+    name: release-plz release
+    runs-on: ubuntu-24.04
+    if: ${{ github.repository_owner == 'JaysonRawlins' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  release-plz-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-24.04
+    if: ${{ github.repository_owner == 'JaysonRawlins' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

@@ -1,0 +1,11 @@
+[workspace]
+# No crates.io publish while the repo is private — the .crate file would
+# expose the source ahead of the public flip. Versions therefore come from
+# git tags, not the registry. At flip time: set publish = true, remove
+# git_only, and do the first `cargo publish` with a registry token.
+publish = false
+git_only = true
+# dist's release.yml owns the GitHub Release: it triggers on the tag
+# release-plz pushes, builds all platform artifacts, and creates the
+# Release. release-plz only makes the release PR and the tag.
+git_release_enable = false

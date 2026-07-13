@@ -33,11 +33,51 @@ must earn its way in through the flight recorder.
    extension downloads at startup, no embedding daemon to silently fail, no
    cwd-relative database paths.
 
+## Install
+
+Prebuilt binaries for macOS (arm64, x86_64), Linux (static musl — arm64,
+x86_64, runs on any distro back to ~2014), and Windows (x86_64) ship with
+every [GitHub Release](https://github.com/JaysonRawlins/ecphory/releases).
+
+**Homebrew (macOS/Linux):**
+
+```sh
+brew install jaysonrawlins/tap/ecphory
+```
+
+**Shell one-liner (macOS/Linux):**
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JaysonRawlins/ecphory/releases/latest/download/ecphory-installer.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/JaysonRawlins/ecphory/releases/latest/download/ecphory-installer.ps1 | iex"
+```
+
+winget packaging is planned (portable exe works today from the Release zip).
+
+**cargo-binstall / from source:**
+
+```sh
+cargo binstall ecphory   # prebuilt, no compile
+cargo install ecphory --locked   # compiles from source
+```
+
+Manual download on macOS: clear quarantine before first run
+(`xattr -c ecphory`) — Homebrew and the installer script handle this for
+you. Binaries are ad-hoc signed; notarization is future work.
+
+See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
+
 ## Status
 
-Early. M1 (canonical store: episodes, prefix-resolvable ids, version
-archive, demote/restore, CLI) is done and tested. Next: tantivy search (M2),
-flight recorder (M3), MCP server (M4).
+v0.2: canonical store, tantivy BM25 search with write-time phrase boosting,
+flight recorder, MCP daemon (stdio + streamable HTTP), REST mirror, eval
+harness (gold-set + used-signal), git mirror export/import. Running in
+production as the author's daily-driver agent memory since 2026-07-12.
 
 ## Lineage
 
