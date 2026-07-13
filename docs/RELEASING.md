@@ -32,8 +32,8 @@ everything. Two tools split the work:
 
 | Secret | Needed for | Notes |
 | --- | --- | --- |
-| `RELEASE_PLZ_TOKEN` | release-plz jobs | Fine-grained PAT (this repo, contents:write + pull-requests:write). **Required for push-button flow**: tags pushed by the default `GITHUB_TOKEN` cannot trigger `release.yml`. Without it the release PR still appears, but the tag won't kick off builds. |
-| `HOMEBREW_TAP_TOKEN` | homebrew publish job | PAT with push to `JaysonRawlins/homebrew-tap`. Only needed once the publish job is enabled (public flip). |
+| `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY` | release-plz jobs | The `ecphory-release-bot` GitHub App (must be installed on this repo). **Required for push-button flow**: tags pushed by the default `GITHUB_TOKEN` cannot trigger `release.yml`; app-minted tokens can. Same pattern as claude-gavel's `gavel-release-bot`. |
+| `HOMEBREW_TAP_TOKEN` | homebrew publish job | PAT with push to `JaysonRawlins/homebrew-tap` — or install `ecphory-release-bot` on the tap and mint a token in a pre-step (needs `allow-dirty = ["ci"]` to customize dist's release.yml; PAT is less invasive). Only needed once the publish job is enabled (public flip). |
 | `CARGO_REGISTRY_TOKEN` | crates.io publish | Only at/after public flip, and only for the first publish if Trusted Publishing is set up afterwards. |
 
 ## Rehearsal (works on the private repo)

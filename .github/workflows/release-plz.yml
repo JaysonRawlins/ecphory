@@ -3,9 +3,9 @@
 # push the vX.Y.Z tag, which triggers release.yml (dist) to build all
 # platform artifacts and create the GitHub Release.
 #
-# RELEASE_PLZ_TOKEN must be a PAT (or GitHub App token) — tags pushed with
-# the default GITHUB_TOKEN cannot trigger release.yml. Fine-grained PAT
-# scope: this repo, contents:write + pull-requests:write.
+# Auth is the ecphory-release-bot GitHub App (RELEASE_APP_ID /
+# RELEASE_APP_PRIVATE_KEY secrets) — tags pushed with the default
+# GITHUB_TOKEN cannot trigger release.yml; app-minted tokens can.
 name: release-plz
 
 permissions:
@@ -24,9 +24,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
@@ -34,7 +41,7 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
   release-plz-pr:
     name: release-plz release-pr
@@ -47,9 +54,16 @@ jobs:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
@@ -57,4 +71,4 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

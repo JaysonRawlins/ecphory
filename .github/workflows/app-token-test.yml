@@ -1,0 +1,25 @@
+# Temporary: proves the ecphory-release-bot app is installed on this repo
+# and the RELEASE_APP_* secrets mint a working token. Deleted before merge.
+name: app-token-test
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Verify token identity and repo access
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh api /installation/repositories -q '.repositories[].full_name'
+          echo "app-slug: ${{ steps.app-token.outputs.app-slug }}"
