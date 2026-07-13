@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value,
     STORED, STRING,
@@ -143,9 +143,42 @@ impl SearchIndex {
         Ok(n)
     }
 
+    /// Build the search query directly from the tokenized text instead of
+    /// QueryParser: even parse_query_lenient honors operator syntax, so a
+    /// leading dash ("fix -25308", "--name") EXCLUDES the term the user is
+    /// searching for. Queries are raw user text, never syntax; quotes and
+    /// booleans get no special meaning either.
+    fn plain_text_query(&self, query: &str) -> Result<BooleanQuery> {
+        let mut analyzer = self
+            .index
+            .tokenizer_for_field(self.content)
+            .map_err(|e| Error::Storage(format!("query tokenizer: {e}")))?;
+        let mut tokens: Vec<String> = Vec::new();
+        let mut stream = analyzer.token_stream(query);
+        while stream.advance() {
+            tokens.push(stream.token().text.clone());
+        }
+
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(tokens.len() * 3);
+        for token in &tokens {
+            for (field, boost) in [(self.phrases, 2.0), (self.name, 1.5), (self.content, 1.0)] {
+                let tq = TermQuery::new(
+                    Term::from_field_text(field, token),
+                    IndexRecordOption::WithFreqs,
+                );
+                let q: Box<dyn Query> = if boost == 1.0 {
+                    Box::new(tq)
+                } else {
+                    Box::new(BoostQuery::new(Box::new(tq), boost))
+                };
+                clauses.push((Occur::Should, q));
+            }
+        }
+        Ok(BooleanQuery::new(clauses))
+    }
+
     /// BM25 search across name/content/phrases with phrases boosted highest.
-    /// Returns ranked (id, score); lenient parsing so raw user text with
-    /// stray syntax characters never errors.
+    /// Returns ranked (id, score).
     pub fn search(&self, query: &str, limit: usize, include_deleted: bool) -> Result<Vec<Hit>> {
         let reader = self
             .index
@@ -153,11 +186,7 @@ impl SearchIndex {
             .map_err(|e| Error::Storage(format!("index reader: {e}")))?;
         let searcher = reader.searcher();
 
-        let mut parser =
-            QueryParser::for_index(&self.index, vec![self.name, self.content, self.phrases]);
-        parser.set_field_boost(self.phrases, 2.0);
-        parser.set_field_boost(self.name, 1.5);
-        let (query, _errors) = parser.parse_query_lenient(query);
+        let query = self.plain_text_query(query)?;
 
         let top = searcher
             .search(&query, &TopDocs::with_limit(limit.max(1)).order_by_score())
@@ -184,5 +213,103 @@ impl SearchIndex {
             hits.push(Hit { id, score });
         }
         Ok(hits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Episode;
+
+    fn indexed(episodes: &[Episode]) -> SearchIndex {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = SearchIndex::open(dir.path()).unwrap();
+        for ep in episodes {
+            idx.upsert(ep).unwrap();
+        }
+        idx.commit().unwrap();
+        // Keep the tempdir alive for the test's duration by leaking it; the
+        // OS reclaims /tmp and the handle is process-scoped.
+        std::mem::forget(dir);
+        idx
+    }
+
+    fn ep(name: &str, content: &str) -> Episode {
+        let mut e = Episode::new(content, "test");
+        e.name = Some(name.into());
+        e
+    }
+
+    #[test]
+    fn leading_dash_token_is_a_term_not_an_exclusion() {
+        // The regression from the live gold eval: "fix -25308" must FIND the
+        // episode containing 25308, not exclude it.
+        let idx = indexed(&[
+            ep(
+                "granted keychain to file-backend",
+                "assume writes error -25308 user interaction is not allowed; switch keyring backend to file",
+            ),
+            ep("unrelated", "tailscale mosh phone blink headless ssh"),
+        ]);
+        let hits = idx
+            .search("granted keychain fix -25308 user interaction not allowed", 5, false)
+            .unwrap();
+        assert!(!hits.is_empty());
+        let top = &hits[0];
+        let target = idx.search("granted keychain to file-backend", 1, false).unwrap()[0]
+            .id
+            .clone();
+        assert_eq!(top.id, target, "dash token must match, not exclude");
+    }
+
+    #[test]
+    fn cli_flag_tokens_match() {
+        let idx = indexed(&[
+            ep("ghostty naming", "pair the terminal tab via claude --name pid"),
+            ep("other", "completely different content about databases"),
+        ]);
+        let hits = idx.search("Ghostty --name pid terminal tab", 5, false).unwrap();
+        assert!(!hits.is_empty());
+        // Before the fix this query returned only the non-matching doc set.
+        let top_doc = &hits[0];
+        let by_name = idx.search("ghostty naming", 1, false).unwrap();
+        assert_eq!(top_doc.id, by_name[0].id);
+    }
+
+    #[test]
+    fn operators_and_quotes_are_plain_text() {
+        let idx = indexed(&[ep("a", "alpha AND beta OR \"gamma\" field:value")]);
+        for q in ["alpha AND beta", "\"gamma\"", "field:value", "(alpha)"] {
+            assert!(
+                !idx.search(q, 5, false).unwrap().is_empty(),
+                "query {q:?} should match as plain text"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_whitespace_queries_return_nothing() {
+        let idx = indexed(&[ep("a", "some content")]);
+        assert!(idx.search("", 5, false).unwrap().is_empty());
+        assert!(idx.search("   ", 5, false).unwrap().is_empty());
+        assert!(idx.search("--- ::: !!!", 5, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn phrase_field_boost_still_applies() {
+        let mut with_phrase = ep("ep-with-phrase", "body about databases");
+        with_phrase.search_phrases = vec!["release page has nothing to download".into()];
+        let content_only = ep(
+            "ep-content-only",
+            "the release page has nothing to download today",
+        );
+        let idx = indexed(&[with_phrase, content_only]);
+        let hits = idx.search("release page has nothing to download", 2, false).unwrap();
+        assert_eq!(hits.len(), 2);
+        let name_of_top = idx.search("ep-with-phrase", 1, false).unwrap()[0].id.clone();
+        assert_eq!(
+            hits[0].id, name_of_top,
+            "a search_phrases match must outrank an incidental content match"
+        );
     }
 }
