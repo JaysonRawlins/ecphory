@@ -4,7 +4,9 @@ use std::time::Instant;
 use crate::error::Result;
 use crate::index::{Hit, SearchIndex};
 use crate::model::{Episode, UpdateParams};
-use crate::recorder::{self, AccessLogEntry, LoggedHit, RecorderStats, SearchLogEntry};
+use crate::recorder::{
+    self, AccessLogEntry, LoggedHit, Rating, RatingLogEntry, RecorderStats, SearchLogEntry,
+};
 use crate::store::{ListOptions, Store};
 
 /// Store + index, kept in sync. All writes go through here so the index can
@@ -36,6 +38,9 @@ pub struct SearchResult {
 pub struct SearchOutcome {
     pub results: Vec<SearchResult>,
     pub latency_us: u128,
+    /// Recorder entry id for this search, when it was recorded. The handle
+    /// a consumer passes to rate_search to log its verdict.
+    pub search_id: Option<uuid::Uuid>,
 }
 
 impl Ecphory {
@@ -165,6 +170,17 @@ impl Ecphory {
     /// from the index (4x) so filters don't starve the requested limit — at
     /// personal-corpus scale the overfetch cost is noise.
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<SearchOutcome> {
+        self.search_impl(query, opts, true)
+    }
+
+    /// Search without touching the recorder — for eval replays, benchmarks,
+    /// and bulk jobs whose queries are not workload signal. The burst-
+    /// polluted tape of 2026-07-13 (978/1000 entries synthetic) taught this.
+    pub fn search_unrecorded(&self, query: &str, opts: &SearchOptions) -> Result<SearchOutcome> {
+        self.search_impl(query, opts, false)
+    }
+
+    fn search_impl(&self, query: &str, opts: &SearchOptions, record: bool) -> Result<SearchOutcome> {
         let started = Instant::now();
         let limit = if opts.limit == 0 { 10 } else { opts.limit };
         let overfetch = (limit * 4).max(50);
@@ -202,13 +218,15 @@ impl Ecphory {
             }
         }
 
-        let outcome = SearchOutcome { results, latency_us: started.elapsed().as_micros() };
+        let mut outcome =
+            SearchOutcome { results, latency_us: started.elapsed().as_micros(), search_id: None };
 
         // Record the search. Empty queries are browses, not retrieval events;
         // logging them would drown the workload signal.
-        if self.recording && !query.trim().is_empty() {
+        if record && self.recording && !query.trim().is_empty() {
+            let search_id = uuid::Uuid::now_v7();
             self.store.log_search(&SearchLogEntry {
-                id: uuid::Uuid::now_v7(),
+                id: search_id,
                 ts: chrono::Utc::now(),
                 query: query.to_string(),
                 limit,
@@ -228,9 +246,33 @@ impl Ecphory {
                     .collect(),
                 latency_us: outcome.latency_us as u64,
             });
+            outcome.search_id = Some(search_id);
         }
 
         Ok(outcome)
+    }
+
+    /// Record the consumer's verdict on a recorded search. The search_id
+    /// must reference a real search-log entry — garbage ids are refused so
+    /// the rating stream stays joinable.
+    pub fn rate_search(
+        &self,
+        search_id: &str,
+        rating: Rating,
+        used_episode_ids: Vec<String>,
+        note: Option<String>,
+    ) -> Result<RatingLogEntry> {
+        let search = self.store.get_search_entry(search_id)?;
+        let entry = RatingLogEntry {
+            id: uuid::Uuid::now_v7(),
+            ts: chrono::Utc::now(),
+            search_id: search.id.to_string(),
+            rating,
+            used_episode_ids,
+            note,
+        };
+        self.store.log_rating(&entry)?;
+        Ok(entry)
     }
 
     pub fn recent_searches(&self, limit: usize) -> Result<Vec<SearchLogEntry>> {
@@ -241,10 +283,15 @@ impl Ecphory {
         self.store.recent_accesses(limit)
     }
 
+    pub fn recent_ratings(&self, limit: usize) -> Result<Vec<RatingLogEntry>> {
+        self.store.recent_ratings(limit)
+    }
+
     pub fn stats(&self) -> Result<RecorderStats> {
         let searches = self.store.recent_searches(0)?;
         let accesses = self.store.recent_accesses(0)?;
-        Ok(recorder::compute_stats(&searches, accesses.len()))
+        let ratings = self.store.recent_ratings(0)?;
+        Ok(recorder::compute_stats(&searches, accesses.len(), &ratings))
     }
 }
 
@@ -406,6 +453,52 @@ mod tests {
         // Joins inside search() must not pollute the access log.
         svc.search("axolotls", &SearchOptions::default()).unwrap();
         assert_eq!(svc.recent_accesses(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_returns_search_id_and_rating_roundtrips() {
+        let (mut svc, _d) = temp();
+        let e = ep("rating target about narwhals");
+        svc.insert(&e).unwrap();
+
+        let out = svc.search("narwhals", &SearchOptions::default()).unwrap();
+        let search_id = out.search_id.expect("recorded search must return search_id");
+
+        let entry = svc
+            .rate_search(
+                &search_id.to_string(),
+                Rating::Hit,
+                vec![e.id.to_string()[..8].to_string()],
+                Some("answered directly".into()),
+            )
+            .unwrap();
+        assert_eq!(entry.search_id, search_id.to_string());
+        assert_eq!(entry.rating, Rating::Hit);
+
+        let ratings = svc.recent_ratings(10).unwrap();
+        assert_eq!(ratings.len(), 1);
+        assert_eq!(ratings[0].used_episode_ids, vec![e.id.to_string()[..8].to_string()]);
+
+        // Garbage search_id is refused — the rating stream stays joinable.
+        assert!(svc
+            .rate_search("not-a-real-search", Rating::Miss, vec![], None)
+            .is_err());
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.rated, 1);
+        assert_eq!(s.rated_hit, 1);
+        assert_eq!(s.rated_miss, 0);
+    }
+
+    #[test]
+    fn unrecorded_search_leaves_no_tape_and_no_search_id() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("stealth search fodder about ocelots")).unwrap();
+
+        let out = svc.search_unrecorded("ocelots", &SearchOptions::default()).unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert!(out.search_id.is_none());
+        assert!(svc.recent_searches(10).unwrap().is_empty());
     }
 
     #[test]

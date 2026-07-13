@@ -20,6 +20,9 @@ const VERSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("episode_ver
 /// retention pruning and newest-first reads are plain range scans.
 const SEARCH_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("search_log");
 const ACCESS_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("access_log");
+/// Explicit consumer verdicts on searches (rate_search) — the preferred
+/// quality signal; the access-log join is the fallback for unrated searches.
+const RATING_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("rating_log");
 
 pub struct Store {
     db: Database,
@@ -47,6 +50,7 @@ impl Store {
             tx.open_table(VERSIONS)?;
             tx.open_table(SEARCH_LOG)?;
             tx.open_table(ACCESS_LOG)?;
+            tx.open_table(RATING_LOG)?;
         }
         tx.commit()?;
         Ok(Self { db })
@@ -260,6 +264,22 @@ impl Store {
         }
     }
 
+    /// Ratings are the consumer's verdict, not diagnostics — a failed write
+    /// surfaces to the caller instead of being swallowed.
+    pub fn log_rating(&self, entry: &crate::recorder::RatingLogEntry) -> Result<()> {
+        self.try_log(RATING_LOG, &entry.id.to_string(), entry)
+    }
+
+    /// Direct search-log lookup by entry id — validates rate_search targets.
+    pub fn get_search_entry(&self, id: &str) -> Result<crate::recorder::SearchLogEntry> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(SEARCH_LOG)?;
+        match t.get(id.trim().to_lowercase().as_str())? {
+            Some(guard) => Ok(serde_json::from_slice(guard.value())?),
+            None => Err(Error::NotFound(format!("search log entry {id}"))),
+        }
+    }
+
     fn try_log<T: serde::Serialize>(
         &self,
         table: TableDefinition<&str, &[u8]>,
@@ -286,6 +306,11 @@ impl Store {
         self.read_log(ACCESS_LOG, limit)
     }
 
+    /// Newest-first rating log entries.
+    pub fn recent_ratings(&self, limit: usize) -> Result<Vec<crate::recorder::RatingLogEntry>> {
+        self.read_log(RATING_LOG, limit)
+    }
+
     fn read_log<T: serde::de::DeserializeOwned>(
         &self,
         table: TableDefinition<&str, &[u8]>,
@@ -307,7 +332,7 @@ impl Store {
     /// Delete recorder entries older than the cutoff. Returns entries removed.
     pub fn prune_logs(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
         let mut removed = 0;
-        for table in [SEARCH_LOG, ACCESS_LOG] {
+        for table in [SEARCH_LOG, ACCESS_LOG, RATING_LOG] {
             let tx = self.db.begin_write()?;
             {
                 let mut t = tx.open_table(table)?;
