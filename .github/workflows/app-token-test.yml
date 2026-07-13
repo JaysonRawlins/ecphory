@@ -5,7 +5,8 @@ name: app-token-test
 permissions: {}
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [feat/release-engineering]
 
 jobs:
   mint:
