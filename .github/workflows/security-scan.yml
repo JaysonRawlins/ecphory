@@ -1,0 +1,36 @@
+name: security-scan
+
+# Syft SBOM -> Grype vulnerability scan over the Cargo dependency tree.
+# Weekly schedule matters as much as the PR trigger: new CVEs land against
+# existing lockfiles. Fails only on critical so the check stays meaningful
+# instead of becoming an ignored always-red gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+
+jobs:
+  grype:
+    name: sbom + grype
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom.spdx.json
+      # Findings table prints in the job log; fail-build gates on critical.
+      - name: Scan SBOM
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          sbom: sbom.spdx.json
+          fail-build: true
+          severity-cutoff: critical
+          output-format: table
