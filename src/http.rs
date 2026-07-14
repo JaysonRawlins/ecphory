@@ -36,6 +36,8 @@ pub fn build_router(state: Shared) -> Router {
         .route("/memory/episodes/{id}/versions", get(episode_versions))
         .route("/memory/search-log", get(search_log))
         .route("/memory/access-log", get(access_log))
+        .route("/memory/rating-log", get(rating_log))
+        .route("/memory/search-rating", post(rate_search))
         .route("/memory/stats", get(stats))
         .route("/status", get(status))
         .route("/admin/import", post(admin_import))
@@ -152,6 +154,10 @@ struct SearchQuery {
     tags: Option<String>,
     #[serde(default)]
     include_deleted: bool,
+    /// Replay/benchmark bypass: skip the search log (eval replays and bulk
+    /// sweeps are not workload signal and must not pollute the tape).
+    #[serde(default)]
+    no_record: bool,
 }
 
 async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Response {
@@ -159,17 +165,20 @@ async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Re
         .tags
         .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
         .unwrap_or_default();
+    let opts = SearchOptions {
+        limit: if q.max_results == 0 { 10 } else { q.max_results },
+        include_deleted: q.include_deleted,
+        group_id: q.group_id.filter(|s| !s.is_empty()),
+        source: q.source.filter(|s| !s.is_empty()),
+        tags,
+    };
     let svc = state.svc.lock().expect("service lock");
-    match svc.search(
-        &q.query,
-        &SearchOptions {
-            limit: if q.max_results == 0 { 10 } else { q.max_results },
-            include_deleted: q.include_deleted,
-            group_id: q.group_id.filter(|s| !s.is_empty()),
-            source: q.source.filter(|s| !s.is_empty()),
-            tags,
-        },
-    ) {
+    let result = if q.no_record {
+        svc.search_unrecorded(&q.query, &opts)
+    } else {
+        svc.search(&q.query, &opts)
+    };
+    match result {
         Ok(out) => {
             let results: Vec<_> = out
                 .results
@@ -179,6 +188,7 @@ async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Re
             Json(json!({
                 "count": results.len(),
                 "latency_ms": out.latency_us as f64 / 1000.0,
+                "search_id": out.search_id,
                 "results": results,
             }))
             .into_response()
@@ -311,6 +321,49 @@ async fn access_log(State(state): State<Shared>, Query(q): Query<LimitQuery>) ->
     let svc = state.svc.lock().expect("service lock");
     match svc.recent_accesses(q.limit.clamp(0, 1000)) {
         Ok(entries) => Json(json!({"count": entries.len(), "accesses": entries})).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+async fn rating_log(State(state): State<Shared>, Query(q): Query<LimitQuery>) -> Response {
+    let svc = state.svc.lock().expect("service lock");
+    match svc.recent_ratings(q.limit.clamp(0, 1000)) {
+        Ok(entries) => Json(json!({"count": entries.len(), "ratings": entries})).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RateSearchBody {
+    search_id: String,
+    /// "hit" | "partial" | "miss"
+    rating: String,
+    #[serde(default)]
+    used_episode_ids: Vec<String>,
+    /// Miss/partial ground truth: episodes that should have surfaced.
+    /// Triggers self-correction (enrich → redo → validate) per target.
+    #[serde(default)]
+    intended_episode_ids: Vec<String>,
+    #[serde(default)]
+    note: String,
+}
+
+async fn rate_search(State(state): State<Shared>, Json(body): Json<RateSearchBody>) -> Response {
+    let rating: crate::recorder::Rating = match body.rating.parse() {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    let mut svc = state.svc.lock().expect("service lock");
+    match svc.rate_search(
+        &body.search_id,
+        rating,
+        body.used_episode_ids,
+        body.intended_episode_ids,
+        none_if_empty(body.note),
+    ) {
+        Ok(entry) => {
+            (StatusCode::CREATED, Json(json!({"success": true, "rating": entry}))).into_response()
+        }
         Err(e) => map_err(e),
     }
 }

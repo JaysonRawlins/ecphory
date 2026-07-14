@@ -122,6 +122,11 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Recent explicit search ratings (the consumer's verdicts), newest first
+    Ratings {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Serve MCP over stdio (single client; prefer `serve` for shared use)
     Mcp,
     /// Serve MCP over streamable HTTP on localhost — one daemon, many sessions
@@ -345,6 +350,22 @@ fn main() -> anyhow::Result<()> {
         Command::AccessLog { limit } => {
             for e in svc.recent_accesses(limit)? {
                 println!("{}  {}", e.ts.format("%Y-%m-%d %H:%M:%S"), e.episode_id);
+            }
+        }
+        Command::Ratings { limit } => {
+            for e in svc.recent_ratings(limit)? {
+                println!(
+                    "{}  {:<7}  search {}  used [{}]{}",
+                    e.ts.format("%Y-%m-%d %H:%M:%S"),
+                    format!("{:?}", e.rating).to_lowercase(),
+                    &e.search_id[..8.min(e.search_id.len())],
+                    e.used_episode_ids
+                        .iter()
+                        .map(|id| &id[..8.min(id.len())])
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    e.note.as_deref().map(|n| format!("  — {n}")).unwrap_or_default()
+                );
             }
         }
         Command::Mcp => {

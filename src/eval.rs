@@ -119,6 +119,7 @@ struct EpisodeId {
 
 #[derive(Debug, Deserialize)]
 pub struct LoggedSearch {
+    pub id: String,
     pub ts: chrono::DateTime<chrono::Utc>,
     pub query: String,
     pub result_count: usize,
@@ -135,6 +136,14 @@ pub struct LoggedHit {
 pub struct LoggedAccess {
     pub ts: chrono::DateTime<chrono::Utc>,
     pub episode_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoggedRating {
+    pub search_id: String,
+    pub rating: String,
+    #[serde(default)]
+    pub used_episode_ids: Vec<String>,
 }
 
 impl EvalClient {
@@ -158,8 +167,11 @@ impl EvalClient {
 
     pub fn search(&self, query: &str, k: usize) -> Result<(f64, Vec<String>)> {
         let encoded: String = url_encode(query);
-        let resp: SearchResponse =
-            self.get_json(&format!("/api/v1/memory/search?query={encoded}&max_results={k}"))?;
+        // no_record: eval replays are not workload signal — recording them
+        // would pollute the very tape this eval scores (observer effect).
+        let resp: SearchResponse = self.get_json(&format!(
+            "/api/v1/memory/search?query={encoded}&max_results={k}&no_record=true"
+        ))?;
         Ok((resp.latency_ms, resp.results.into_iter().map(|r| r.episode.id).collect()))
     }
 
@@ -179,6 +191,15 @@ impl EvalClient {
         }
         let w: Wrap = self.get_json(&format!("/api/v1/memory/access-log?limit={limit}"))?;
         Ok(w.accesses)
+    }
+
+    pub fn rating_log(&self, limit: usize) -> Result<Vec<LoggedRating>> {
+        #[derive(Deserialize)]
+        struct Wrap {
+            ratings: Vec<LoggedRating>,
+        }
+        let w: Wrap = self.get_json(&format!("/api/v1/memory/rating-log?limit={limit}"))?;
+        Ok(w.ratings)
     }
 }
 
@@ -289,9 +310,81 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
 
 // ---- from-log mode -----------------------------------------------------------
 
+/// Entries per UTC second at or above which a cluster is treated as
+/// synthetic (benchmark replays, bulk sweeps) rather than organic use. A
+/// human-driven session doesn't issue 5 searches or fetches in one second.
+const BURST_THRESHOLD: usize = 5;
+
+/// Drop entries that fall in bursty seconds. Returns (kept, dropped_count).
+fn drop_bursts<T>(entries: Vec<T>, ts_of: impl Fn(&T) -> chrono::DateTime<chrono::Utc>) -> (Vec<T>, usize) {
+    let mut per_sec: std::collections::HashMap<i64, usize> = Default::default();
+    for e in &entries {
+        *per_sec.entry(ts_of(e).timestamp()).or_default() += 1;
+    }
+    let before = entries.len();
+    let kept: Vec<T> = entries
+        .into_iter()
+        .filter(|e| per_sec[&ts_of(e).timestamp()] < BURST_THRESHOLD)
+        .collect();
+    let dropped = before - kept.len();
+    (kept, dropped)
+}
+
 pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<bool> {
-    let searches = client.search_log(1000)?;
-    let accesses = client.access_log(1000)?;
+    let raw_searches = client.search_log(1000)?;
+    let raw_accesses = client.access_log(1000)?;
+    let ratings = client.rating_log(1000)?;
+
+    // Explicit ratings: the preferred signal — the consumer's own verdict
+    // at the moment of use. Joined by id against the UNFILTERED tape (a
+    // rating is explicit regardless of how bursty its search looked).
+    let mut ratings_summary: Vec<String> = Vec::new();
+    if !ratings.is_empty() {
+        let by_id: std::collections::HashMap<&str, &LoggedSearch> =
+            raw_searches.iter().map(|s| (s.id.as_str(), s)).collect();
+        let (hits, partials, misses) = ratings.iter().fold((0, 0, 0), |(h, p, m), r| {
+            match r.rating.as_str() {
+                "hit" => (h + 1, p, m),
+                "partial" => (h, p + 1, m),
+                _ => (h, p, m + 1),
+            }
+        });
+        ratings_summary.push(format!(
+            "explicit ratings ({}): {hits} hit, {partials} partial, {misses} miss",
+            ratings.len()
+        ));
+
+        let mut rated_taped = BucketMetrics::default();
+        let mut rated_fresh = BucketMetrics::default();
+        for r in &ratings {
+            let Some(search) = by_id.get(r.search_id.as_str()) else { continue };
+            for used in &r.used_episode_ids {
+                let taped_rank = search
+                    .results
+                    .iter()
+                    .find(|h| h.id.starts_with(used.as_str()))
+                    .map(|h| h.rank);
+                rated_taped.record(taped_rank);
+                let (_, ids) = client.search(&search.query, k)?;
+                rated_fresh.record(rank_of(used, &ids));
+            }
+        }
+        if rated_taped.n > 0 {
+            ratings_summary.push(format!("  {}", rated_taped.line("rated-taped")));
+            ratings_summary.push(format!("  {}", rated_fresh.line("rated-now")));
+        }
+    }
+
+    // Synthetic-traffic guard: burst clusters (same-second floods from
+    // benchmarks, replays, bulk jobs) are not usage signal.
+    let (searches, dropped_s) = drop_bursts(raw_searches, |s: &LoggedSearch| s.ts);
+    let (accesses, dropped_a) = drop_bursts(raw_accesses, |a: &LoggedAccess| a.ts);
+    if dropped_s + dropped_a > 0 {
+        println!(
+            "burst filter: dropped {dropped_s} searches, {dropped_a} accesses \
+             (>= {BURST_THRESHOLD}/sec — synthetic traffic)"
+        );
+    }
 
     // Tape overview: what does the real workload look like?
     let mut bucket_counts: std::collections::HashMap<Bucket, usize> = Default::default();
@@ -299,15 +392,25 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
     for s in &searches {
         *bucket_counts.entry(classify(&s.query)).or_default() += 1;
     }
-    println!("tape: {} searches ({} zero-hit), {} accesses", searches.len(), zero_hit, accesses.len());
+    println!(
+        "tape: {} searches ({} zero-hit), {} accesses, {} ratings",
+        searches.len(),
+        zero_hit,
+        accesses.len(),
+        ratings.len()
+    );
     for bucket in [Bucket::Identifier, Bucket::Conceptual, Bucket::Mixed] {
         if let Some(n) = bucket_counts.get(&bucket) {
             println!("  {bucket:<12} {n}");
         }
     }
+    for line in &ratings_summary {
+        println!("{line}");
+    }
 
-    // Used-signal join: each access labels the nearest preceding search
-    // within the window. Dedupe identical (query, id) pairs.
+    // Used-signal join (fallback inference for unrated searches): each
+    // access labels the nearest preceding search within the window.
+    // Dedupe identical (query, id) pairs.
     let mut labeled: Vec<(&LoggedSearch, &LoggedAccess)> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = Default::default();
     for access in &accesses {
@@ -388,6 +491,20 @@ mod tests {
             classify("that thing about deletion being tiering instead of destruction"),
             Bucket::Conceptual
         );
+    }
+
+    #[test]
+    fn drop_bursts_keeps_organic_drops_synthetic() {
+        use chrono::TimeZone;
+        let base = chrono::Utc.with_ymd_and_hms(2026, 7, 13, 12, 0, 0).unwrap();
+        // 6 entries in one second (synthetic), 2 spread out (organic).
+        let mut entries: Vec<chrono::DateTime<chrono::Utc>> = vec![base; 6];
+        entries.push(base + chrono::Duration::seconds(10));
+        entries.push(base + chrono::Duration::seconds(70));
+
+        let (kept, dropped) = drop_bursts(entries, |ts| *ts);
+        assert_eq!(dropped, 6);
+        assert_eq!(kept.len(), 2);
     }
 
     #[test]

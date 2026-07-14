@@ -4,8 +4,20 @@ use std::time::Instant;
 use crate::error::Result;
 use crate::index::{Hit, SearchIndex};
 use crate::model::{Episode, UpdateParams};
-use crate::recorder::{self, AccessLogEntry, LoggedHit, RecorderStats, SearchLogEntry};
+use crate::recorder::{
+    self, AccessLogEntry, Correction, CorrectionAction, LoggedHit, Rating, RatingLogEntry,
+    RecorderStats, SearchLogEntry,
+};
 use crate::store::{ListOptions, Store};
+
+/// Validation window for self-correction: a target ranking within the top
+/// CORRECTION_K counts as retrievable (matches the eval's default k).
+const CORRECTION_K: usize = 5;
+
+/// Phrase-count ceiling per episode. search_phrases are boosted 2x, so
+/// unbounded miss-driven accumulation turns a much-missed episode into
+/// lexical mass that crowds out its siblings.
+const MAX_SEARCH_PHRASES: usize = 8;
 
 /// Store + index, kept in sync. All writes go through here so the index can
 /// never silently drift from the source of truth (and if it ever does,
@@ -36,6 +48,9 @@ pub struct SearchResult {
 pub struct SearchOutcome {
     pub results: Vec<SearchResult>,
     pub latency_us: u128,
+    /// Recorder entry id for this search, when it was recorded. The handle
+    /// a consumer passes to rate_search to log its verdict.
+    pub search_id: Option<uuid::Uuid>,
 }
 
 impl Ecphory {
@@ -165,6 +180,17 @@ impl Ecphory {
     /// from the index (4x) so filters don't starve the requested limit — at
     /// personal-corpus scale the overfetch cost is noise.
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<SearchOutcome> {
+        self.search_impl(query, opts, true)
+    }
+
+    /// Search without touching the recorder — for eval replays, benchmarks,
+    /// and bulk jobs whose queries are not workload signal. The burst-
+    /// polluted tape of 2026-07-13 (978/1000 entries synthetic) taught this.
+    pub fn search_unrecorded(&self, query: &str, opts: &SearchOptions) -> Result<SearchOutcome> {
+        self.search_impl(query, opts, false)
+    }
+
+    fn search_impl(&self, query: &str, opts: &SearchOptions, record: bool) -> Result<SearchOutcome> {
         let started = Instant::now();
         let limit = if opts.limit == 0 { 10 } else { opts.limit };
         let overfetch = (limit * 4).max(50);
@@ -202,13 +228,15 @@ impl Ecphory {
             }
         }
 
-        let outcome = SearchOutcome { results, latency_us: started.elapsed().as_micros() };
+        let mut outcome =
+            SearchOutcome { results, latency_us: started.elapsed().as_micros(), search_id: None };
 
         // Record the search. Empty queries are browses, not retrieval events;
         // logging them would drown the workload signal.
-        if self.recording && !query.trim().is_empty() {
+        if record && self.recording && !query.trim().is_empty() {
+            let search_id = uuid::Uuid::now_v7();
             self.store.log_search(&SearchLogEntry {
-                id: uuid::Uuid::now_v7(),
+                id: search_id,
                 ts: chrono::Utc::now(),
                 query: query.to_string(),
                 limit,
@@ -228,9 +256,112 @@ impl Ecphory {
                     .collect(),
                 latency_us: outcome.latency_us as u64,
             });
+            outcome.search_id = Some(search_id);
         }
 
         Ok(outcome)
+    }
+
+    /// Record the consumer's verdict on a recorded search. The search_id
+    /// must reference a real search-log entry — garbage ids are refused so
+    /// the rating stream stays joinable.
+    ///
+    /// A non-hit rating with known targets (intended ∪ used) triggers the
+    /// self-correction loop per target: enrich → redo → validate. The taped
+    /// query is ground-truth asking vocabulary, so a validated enrichment
+    /// permanently closes that vocabulary gap.
+    pub fn rate_search(
+        &mut self,
+        search_id: &str,
+        rating: Rating,
+        used_episode_ids: Vec<String>,
+        intended_episode_ids: Vec<String>,
+        note: Option<String>,
+    ) -> Result<RatingLogEntry> {
+        let search = self.store.get_search_entry(search_id)?;
+
+        let mut corrections = Vec::new();
+        if rating != Rating::Hit {
+            let mut targets: Vec<String> = intended_episode_ids
+                .iter()
+                .chain(used_episode_ids.iter())
+                .cloned()
+                .collect();
+            targets.dedup();
+            for target in &targets {
+                corrections.push(self.self_correct(&search.query, target));
+            }
+        }
+
+        let entry = RatingLogEntry {
+            id: uuid::Uuid::now_v7(),
+            ts: chrono::Utc::now(),
+            search_id: search.id.to_string(),
+            rating,
+            used_episode_ids,
+            intended_episode_ids,
+            corrections,
+            note,
+        };
+        self.store.log_rating(&entry)?;
+        Ok(entry)
+    }
+
+    /// Enrich → redo → validate for one missed target. Deliberately NOT
+    /// applied when the target already ranks (stale rating) or when the
+    /// query is already a phrase (that miss is crowding or a bug — more
+    /// lexical mass won't fix it and phrase inflation crowds siblings).
+    fn self_correct(&mut self, query: &str, id_or_prefix: &str) -> Correction {
+        let mk = |id: &str, action, before, after| Correction {
+            episode_id: id.to_string(),
+            action,
+            before_rank: before,
+            after_rank: after,
+        };
+
+        let ep = match self.store.get(id_or_prefix) {
+            Ok(ep) => ep,
+            Err(_) => return mk(id_or_prefix, CorrectionAction::TargetNotFound, None, None),
+        };
+        let id = ep.id.to_string();
+
+        let before = self.rank_of_unrecorded(query, &id);
+        if before.is_some_and(|r| r <= CORRECTION_K) {
+            return mk(&id, CorrectionAction::AlreadyRanks, before, before);
+        }
+
+        let normalized = query.trim().to_lowercase();
+        if ep.search_phrases.iter().any(|p| p.trim().to_lowercase() == normalized) {
+            return mk(&id, CorrectionAction::DuplicatePhrase, before, None);
+        }
+        if ep.search_phrases.len() >= MAX_SEARCH_PHRASES {
+            return mk(&id, CorrectionAction::PhraseCapReached, before, None);
+        }
+
+        let mut phrases = ep.search_phrases.clone();
+        phrases.push(query.trim().to_string());
+        if self
+            .update(&id, UpdateParams { search_phrases: Some(phrases), ..Default::default() })
+            .is_err()
+        {
+            return mk(&id, CorrectionAction::TargetNotFound, before, None);
+        }
+
+        let after = self.rank_of_unrecorded(query, &id);
+        let action = if after.is_some_and(|r| r <= CORRECTION_K) {
+            CorrectionAction::Enriched
+        } else {
+            CorrectionAction::EnrichedStillLow
+        };
+        mk(&id, action, before, after)
+    }
+
+    /// Rank (1-based) of `id` for `query` within CORRECTION_K, unrecorded so
+    /// correction probes never pollute the workload tape.
+    fn rank_of_unrecorded(&self, query: &str, id: &str) -> Option<usize> {
+        let opts = SearchOptions { limit: CORRECTION_K, ..Default::default() };
+        let out = self.search_unrecorded(query, &opts).ok()?;
+        out.results.iter().find(|r| r.episode.id.to_string() == id).map(|r| r.rank)
     }
 
     pub fn recent_searches(&self, limit: usize) -> Result<Vec<SearchLogEntry>> {
@@ -241,10 +372,15 @@ impl Ecphory {
         self.store.recent_accesses(limit)
     }
 
+    pub fn recent_ratings(&self, limit: usize) -> Result<Vec<RatingLogEntry>> {
+        self.store.recent_ratings(limit)
+    }
+
     pub fn stats(&self) -> Result<RecorderStats> {
         let searches = self.store.recent_searches(0)?;
         let accesses = self.store.recent_accesses(0)?;
-        Ok(recorder::compute_stats(&searches, accesses.len()))
+        let ratings = self.store.recent_ratings(0)?;
+        Ok(recorder::compute_stats(&searches, accesses.len(), &ratings))
     }
 }
 
@@ -406,6 +542,139 @@ mod tests {
         // Joins inside search() must not pollute the access log.
         svc.search("axolotls", &SearchOptions::default()).unwrap();
         assert_eq!(svc.recent_accesses(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_returns_search_id_and_rating_roundtrips() {
+        let (mut svc, _d) = temp();
+        let e = ep("rating target about narwhals");
+        svc.insert(&e).unwrap();
+
+        let out = svc.search("narwhals", &SearchOptions::default()).unwrap();
+        let search_id = out.search_id.expect("recorded search must return search_id");
+
+        let entry = svc
+            .rate_search(
+                &search_id.to_string(),
+                Rating::Hit,
+                vec![e.id.to_string()[..8].to_string()],
+                vec![],
+                Some("answered directly".into()),
+            )
+            .unwrap();
+        assert_eq!(entry.search_id, search_id.to_string());
+        assert_eq!(entry.rating, Rating::Hit);
+
+        let ratings = svc.recent_ratings(10).unwrap();
+        assert_eq!(ratings.len(), 1);
+        assert_eq!(ratings[0].used_episode_ids, vec![e.id.to_string()[..8].to_string()]);
+
+        // Garbage search_id is refused — the rating stream stays joinable.
+        assert!(svc
+            .rate_search("not-a-real-search", Rating::Miss, vec![], vec![], None)
+            .is_err());
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.rated, 1);
+        assert_eq!(s.rated_hit, 1);
+        assert_eq!(s.rated_miss, 0);
+    }
+
+    #[test]
+    fn miss_with_intended_id_enriches_and_validates() {
+        let (mut svc, _d) = temp();
+        // Zero vocabulary overlap between query and target: guaranteed miss.
+        let target = ep("circus animals marching through downtown streets");
+        svc.insert(&target).unwrap();
+        svc.insert(&ep("unrelated decoy about database indexes")).unwrap();
+
+        let out = svc.search("purple elephant parade", &SearchOptions::default()).unwrap();
+        assert!(out.results.is_empty());
+        let sid = out.search_id.unwrap().to_string();
+
+        // Full id, not an 8-char prefix: sibling test episodes are created in
+        // the same millisecond, and UUIDv7's timestamp prefix makes short
+        // prefixes ambiguous between them.
+        let entry = svc
+            .rate_search(&sid, Rating::Miss, vec![], vec![target.id.to_string()], None)
+            .unwrap();
+        assert_eq!(entry.corrections.len(), 1);
+        let c = &entry.corrections[0];
+        assert_eq!(c.action, CorrectionAction::Enriched);
+        assert_eq!(c.before_rank, None);
+        assert_eq!(c.after_rank, Some(1));
+
+        // The enrichment is durable: the query is now a search phrase.
+        let ep_after = svc.get_unrecorded(&target.id.to_string()).unwrap();
+        assert!(ep_after.search_phrases.iter().any(|p| p == "purple elephant parade"));
+    }
+
+    #[test]
+    fn hit_rating_runs_no_corrections() {
+        let (mut svc, _d) = temp();
+        let e = ep("straightforward content about lighthouses");
+        svc.insert(&e).unwrap();
+        let out = svc.search("lighthouses", &SearchOptions::default()).unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        let entry = svc
+            .rate_search(&sid, Rating::Hit, vec![e.id.to_string()], vec![], None)
+            .unwrap();
+        assert!(entry.corrections.is_empty());
+        assert!(svc.get_unrecorded(&e.id.to_string()).unwrap().search_phrases.is_empty());
+    }
+
+    #[test]
+    fn already_ranking_target_is_left_alone() {
+        let (mut svc, _d) = temp();
+        let e = ep("alpha bravo charlie delta");
+        svc.insert(&e).unwrap();
+        let out = svc.search("alpha bravo", &SearchOptions::default()).unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        // Partial rating (say, the answer needed a second episode too) must
+        // not enrich a target that already ranks.
+        let entry = svc
+            .rate_search(&sid, Rating::Partial, vec![], vec![e.id.to_string()], None)
+            .unwrap();
+        assert_eq!(entry.corrections[0].action, CorrectionAction::AlreadyRanks);
+        assert!(svc.get_unrecorded(&e.id.to_string()).unwrap().search_phrases.is_empty());
+    }
+
+    #[test]
+    fn phrase_cap_blocks_enrichment() {
+        let (mut svc, _d) = temp();
+        let mut e = ep("content sharing nothing with the query vocabulary");
+        e.search_phrases = (0..8).map(|i| format!("existing phrase number {i}")).collect();
+        svc.insert(&e).unwrap();
+        let out = svc.search("zebra quantum harmonica", &SearchOptions::default()).unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        let entry = svc
+            .rate_search(&sid, Rating::Miss, vec![], vec![e.id.to_string()], None)
+            .unwrap();
+        assert_eq!(entry.corrections[0].action, CorrectionAction::PhraseCapReached);
+        assert_eq!(svc.get_unrecorded(&e.id.to_string()).unwrap().search_phrases.len(), 8);
+    }
+
+    #[test]
+    fn unresolvable_target_is_reported_not_fatal() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("anything at all")).unwrap();
+        let out = svc.search("no such thing here", &SearchOptions::default()).unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        let entry = svc
+            .rate_search(&sid, Rating::Miss, vec![], vec!["ffffffff-0000".into()], None)
+            .unwrap();
+        assert_eq!(entry.corrections[0].action, CorrectionAction::TargetNotFound);
+    }
+
+    #[test]
+    fn unrecorded_search_leaves_no_tape_and_no_search_id() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("stealth search fodder about ocelots")).unwrap();
+
+        let out = svc.search_unrecorded("ocelots", &SearchOptions::default()).unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert!(out.search_id.is_none());
+        assert!(svc.recent_searches(10).unwrap().is_empty());
     }
 
     #[test]

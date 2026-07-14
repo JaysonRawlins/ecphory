@@ -46,6 +46,87 @@ pub struct AccessLogEntry {
     pub episode_id: String,
 }
 
+/// The consumer's verdict on a search, given at the moment of use.
+/// Explicit ratings are ground truth; the access-log temporal join is the
+/// fallback inference for unrated searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Rating {
+    /// The results answered the question.
+    Hit,
+    /// Something useful surfaced, but not the best answer or not ranked well.
+    Partial,
+    /// Nothing relevant came back.
+    Miss,
+}
+
+impl std::str::FromStr for Rating {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "hit" => Ok(Rating::Hit),
+            "partial" => Ok(Rating::Partial),
+            "miss" => Ok(Rating::Miss),
+            other => Err(format!("invalid rating {other:?} (expected hit|partial|miss)")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RatingLogEntry {
+    pub id: Uuid,
+    pub ts: DateTime<Utc>,
+    /// The SearchLogEntry this verdict is about.
+    pub search_id: String,
+    pub rating: Rating,
+    /// Episode ids (full or prefix) from the results that were actually used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub used_episode_ids: Vec<String>,
+    /// Episodes that SHOULD have surfaced (miss/partial) — explicit ground
+    /// truth for self-correction. Never inferred from access joins: enriching
+    /// a wrongly-guessed target would bury the right one behind it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intended_episode_ids: Vec<String>,
+    /// Self-correction outcomes for this rating (enrich → redo → validate).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrections: Vec<Correction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One self-correction attempt: on a non-hit rating with a known target,
+/// the missed query is appended to the target's search_phrases (lexical
+/// enrichment — the query IS how this will be asked for again), the search
+/// re-runs, and the outcome records whether that closed the gap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Correction {
+    pub episode_id: String,
+    pub action: CorrectionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_rank: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionAction {
+    /// Target already ranks within k for this query — nothing to fix.
+    AlreadyRanks,
+    /// Phrase appended and the redo validated: target now ranks within k.
+    Enriched,
+    /// Phrase appended but the target STILL ranks outside k — the gap is
+    /// ranking/crowding, not vocabulary. Needs human or ranking-layer work.
+    EnrichedStillLow,
+    /// The query is already a search phrase on the target yet it still
+    /// misses — enrichment can't help; suspect crowding or a search bug.
+    DuplicatePhrase,
+    /// Target already carries the max phrases; not appended. Curation flag.
+    PhraseCapReached,
+    /// The intended id didn't resolve to an episode.
+    TargetNotFound,
+}
+
 /// Aggregates over the recorded workload, for `ecphory stats`.
 #[derive(Debug, Serialize)]
 pub struct RecorderStats {
@@ -62,9 +143,18 @@ pub struct RecorderStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub newest: Option<DateTime<Utc>>,
     pub top_queries: Vec<(String, usize)>,
+    /// Explicit consumer verdicts (rate_search): the preferred quality signal.
+    pub rated: usize,
+    pub rated_hit: usize,
+    pub rated_partial: usize,
+    pub rated_miss: usize,
 }
 
-pub fn compute_stats(searches: &[SearchLogEntry], accesses: usize) -> RecorderStats {
+pub fn compute_stats(
+    searches: &[SearchLogEntry],
+    accesses: usize,
+    ratings: &[RatingLogEntry],
+) -> RecorderStats {
     let mut latencies: Vec<u64> = searches.iter().map(|s| s.latency_us).collect();
     latencies.sort_unstable();
     let pct = |p: f64| -> u64 {
@@ -97,6 +187,10 @@ pub fn compute_stats(searches: &[SearchLogEntry], accesses: usize) -> RecorderSt
         oldest: searches.iter().map(|s| s.ts).min(),
         newest: searches.iter().map(|s| s.ts).max(),
         top_queries: top,
+        rated: ratings.len(),
+        rated_hit: ratings.iter().filter(|r| r.rating == Rating::Hit).count(),
+        rated_partial: ratings.iter().filter(|r| r.rating == Rating::Partial).count(),
+        rated_miss: ratings.iter().filter(|r| r.rating == Rating::Miss).count(),
     }
 }
 

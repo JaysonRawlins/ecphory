@@ -94,6 +94,40 @@ pub struct IdRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct GetEpisodeRequest {
+    /// Full episode UUID or a unique prefix (8+ chars is usually enough).
+    pub id: String,
+    /// Set true for bulk/maintenance reads (backfills, sync sweeps, mass
+    /// exports) so they don't pollute the used-signal in the flight recorder.
+    /// Leave false when fetching an episode you actually want to read.
+    #[serde(default)]
+    pub no_record: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RateSearchRequest {
+    /// The search_id returned by a previous search call.
+    pub search_id: String,
+    /// Verdict on that search's results: "hit" (answered the question),
+    /// "partial" (something useful but not the best answer or badly ranked),
+    /// or "miss" (nothing relevant).
+    pub rating: String,
+    /// Episode ids (full or prefix) from the results that were actually used.
+    #[serde(default)]
+    pub used_episode_ids: Vec<String>,
+    /// On miss/partial: episodes that SHOULD have surfaced (found later by
+    /// other means). Each triggers self-correction — the failed query is
+    /// added to that episode's search_phrases, the search re-runs, and the
+    /// outcome is validated. Only pass ids you are CONFIDENT were the right
+    /// answer; enriching a wrong target buries the right one behind it.
+    #[serde(default)]
+    pub intended_episode_ids: Vec<String>,
+    /// Optional context, e.g. what was actually being looked for on a miss.
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct GetEpisodesRequest {
     /// Maximum results, newest first (default 10).
     #[serde(default)]
@@ -171,7 +205,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search memories (BM25 over content, names, and search phrases). Returns ranked episodes with scores."
+        description = "Search memories (BM25 over content, names, and search phrases). Returns ranked episodes with scores, plus a search_id — after you've read the results and know whether they answered the question, pass that search_id to rate_search."
     )]
     fn search(&self, Parameters(req): Parameters<SearchRequest>) -> Result<String, ErrorData> {
         let svc = self.svc.lock().map_err(internal)?;
@@ -197,16 +231,50 @@ impl McpServer {
         to_json(&serde_json::json!({
             "count": results.len(),
             "latency_ms": out.latency_us as f64 / 1000.0,
+            "search_id": out.search_id,
             "results": results,
         }))
     }
 
     #[tool(
-        description = "Fetch one episode by id or unique id prefix. Returns soft-deleted episodes too (flagged with deleted_at) so id references in handoffs never break."
+        description = "Rate a previous search by its search_id: was the retrieval a hit, partial, or miss? Call this after consuming search results — the moment you know whether they answered the question. Explicit ratings are the store's primary retrieval-quality signal (the query->rate->work loop); include used_episode_ids for the results you actually relied on. On a miss/partial where you later found the right episode, pass its id in intended_episode_ids: the store self-corrects (adds your failed query to that episode's search phrases, re-runs the search, validates) so the same phrasing finds it next time."
     )]
-    fn get_episode(&self, Parameters(req): Parameters<IdRequest>) -> Result<String, ErrorData> {
+    fn rate_search(
+        &self,
+        Parameters(req): Parameters<RateSearchRequest>,
+    ) -> Result<String, ErrorData> {
+        let rating: crate::recorder::Rating =
+            req.rating.parse().map_err(|e: String| ErrorData::invalid_params(e, None))?;
+        let mut svc = self.svc.lock().map_err(internal)?;
+        let entry = svc
+            .rate_search(
+                &req.search_id,
+                rating,
+                req.used_episode_ids,
+                req.intended_episode_ids,
+                opt_str(req.note),
+            )
+            .map_err(not_found)?;
+        to_json(&serde_json::json!({
+            "success": true,
+            "rating_id": entry.id,
+            "corrections": entry.corrections,
+        }))
+    }
+
+    #[tool(
+        description = "Fetch one episode by id or unique id prefix. Returns soft-deleted episodes too (flagged with deleted_at) so id references in handoffs never break. Set no_record=true for bulk/maintenance reads that shouldn't count as usage signal."
+    )]
+    fn get_episode(
+        &self,
+        Parameters(req): Parameters<GetEpisodeRequest>,
+    ) -> Result<String, ErrorData> {
         let svc = self.svc.lock().map_err(internal)?;
-        let ep = svc.get(&req.id).map_err(not_found)?;
+        let ep = if req.no_record {
+            svc.get_unrecorded(&req.id).map_err(not_found)?
+        } else {
+            svc.get(&req.id).map_err(not_found)?
+        };
         to_json(&ep)
     }
 
@@ -317,7 +385,15 @@ impl ServerHandler for McpServer {
              include 2-3 search_phrases: plain-words paraphrases of how this memory will be \
              asked about later, in vocabulary DIFFERENT from the content (symptom framings, \
              questions a future session would ask). Retrieval quality depends on them. \
-             Search accepts free text; episode ids resolve by unique prefix.",
+             Search accepts free text; episode ids resolve by unique prefix. \
+             After consuming search results — the moment you know whether they answered the \
+             question — call rate_search with the returned search_id (hit/partial/miss, plus \
+             used_episode_ids for results you relied on): query->rate->work. When a search \
+             missed and you later find the right episode another way, rate the ORIGINAL \
+             search_id as miss with intended_episode_ids=[that id] — the store self-corrects \
+             so that phrasing finds it next time. For bulk or \
+             maintenance reads, pass no_record=true to get_episode so they don't pollute \
+             the usage signal.",
         )
     }
 }
