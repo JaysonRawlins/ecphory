@@ -71,7 +71,10 @@ fn parse_episode(raw: &str) -> Result<Episode> {
         let value = value.trim();
         match key {
             "embedding" => continue, // lexical-first: vectors not imported
-            "id" => ep.id = Uuid::parse_str(&json_str(value)?).map_err(|e| Error::Storage(format!("bad id: {e}")))?,
+            "id" => {
+                ep.id = Uuid::parse_str(&json_str(value)?)
+                    .map_err(|e| Error::Storage(format!("bad id: {e}")))?
+            }
             "name" => ep.name = Some(json_str(value)?),
             "search_phrases" => ep.search_phrases = serde_json::from_str(value)?,
             "source" => ep.source = json_str(value)?,
@@ -139,7 +142,11 @@ Second line.
         assert_eq!(ep.name.as_deref(), Some("sample-note"));
         assert_eq!(ep.tags, vec!["reference", "supply-chain"]);
         // Escaped quotes inside YAML double-quoted scalars survive.
-        assert!(ep.source_description.unwrap().contains("\"the only safe bet\""));
+        assert!(
+            ep.source_description
+                .unwrap()
+                .contains("\"the only safe bet\"")
+        );
         assert!(ep.content.starts_with("The body"));
         assert!(ep.deleted_at.is_none());
     }

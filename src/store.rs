@@ -461,14 +461,20 @@ mod tests {
         store.demote(&ep.id.to_string()).unwrap();
 
         let listed = store.list(ListOptions::default()).unwrap();
-        assert!(listed.iter().all(|e| e.id != ep.id), "demoted episode listed");
+        assert!(
+            listed.iter().all(|e| e.id != ep.id),
+            "demoted episode listed"
+        );
 
         // Handoff asymmetry: get-by-id still returns it, flagged.
         let got = store.get(&ep.id.to_string()).unwrap();
         assert!(got.is_deleted());
 
         let listed_all = store
-            .list(ListOptions { include_deleted: true, ..Default::default() })
+            .list(ListOptions {
+                include_deleted: true,
+                ..Default::default()
+            })
             .unwrap();
         assert!(listed_all.iter().any(|e| e.id == ep.id));
     }
@@ -494,7 +500,10 @@ mod tests {
             store.insert(&sample(&format!("episode {i}"))).unwrap();
         }
         let listed = store
-            .list(ListOptions { limit: 3, ..Default::default() })
+            .list(ListOptions {
+                limit: 3,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(listed.len(), 3);
         assert_eq!(listed[0].content, "episode 4");
@@ -510,7 +519,10 @@ mod tests {
 
         assert!(store.list(ListOptions::default()).unwrap().is_empty());
         let with_expired = store
-            .list(ListOptions { include_expired: true, ..Default::default() })
+            .list(ListOptions {
+                include_expired: true,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(with_expired.len(), 1);
     }

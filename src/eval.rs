@@ -40,7 +40,9 @@ pub fn classify(query: &str) -> Bucket {
             || w.contains('/')
             || w.contains('_')
             || w.contains("::")
-            || (w.len() >= 3 && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+            || (w.len() >= 3
+                && w.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
             || (w.contains('-') && digits >= 1)
     });
 
@@ -48,11 +50,35 @@ pub fn classify(query: &str) -> Bucket {
     let first = lower.split_whitespace().next().unwrap_or("");
     let question_start = matches!(
         first,
-        "how" | "why" | "what" | "when" | "where" | "can" | "cannot" | "does" | "is" | "should" | "who"
+        "how"
+            | "why"
+            | "what"
+            | "when"
+            | "where"
+            | "can"
+            | "cannot"
+            | "does"
+            | "is"
+            | "should"
+            | "who"
     );
     let symptom_words = [
-        "cannot", "can't", "fails", "failed", "failing", "hangs", "hang", "slow", "broken",
-        "not working", "unfindable", "missing", "times out", "timeout", "error", "crash",
+        "cannot",
+        "can't",
+        "fails",
+        "failed",
+        "failing",
+        "hangs",
+        "hang",
+        "slow",
+        "broken",
+        "not working",
+        "unfindable",
+        "missing",
+        "times out",
+        "timeout",
+        "error",
+        "crash",
     ];
     let has_conceptual = question_start || symptom_words.iter().any(|w| lower.contains(w));
 
@@ -148,7 +174,10 @@ pub struct LoggedRating {
 
 impl EvalClient {
     pub fn new(base: String, token: Option<String>) -> Self {
-        Self { base: base.trim_end_matches('/').to_string(), token }
+        Self {
+            base: base.trim_end_matches('/').to_string(),
+            token,
+        }
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path_and_query: &str) -> Result<T> {
@@ -172,7 +201,10 @@ impl EvalClient {
         let resp: SearchResponse = self.get_json(&format!(
             "/api/v1/memory/search?query={encoded}&max_results={k}&no_record=true"
         ))?;
-        Ok((resp.latency_ms, resp.results.into_iter().map(|r| r.episode.id).collect()))
+        Ok((
+            resp.latency_ms,
+            resp.results.into_iter().map(|r| r.episode.id).collect(),
+        ))
     }
 
     pub fn search_log(&self, limit: usize) -> Result<Vec<LoggedSearch>> {
@@ -239,7 +271,11 @@ impl BucketMetrics {
     }
 
     pub fn mrr(&self) -> f64 {
-        if self.n == 0 { 0.0 } else { self.mrr_sum / self.n as f64 }
+        if self.n == 0 {
+            0.0
+        } else {
+            self.mrr_sum / self.n as f64
+        }
     }
 
     pub fn line(&self, label: &str) -> String {
@@ -258,12 +294,19 @@ impl BucketMetrics {
 
 /// Rank (1-based) of the gold id (full or prefix) in the returned ids.
 pub fn rank_of(gold_id: &str, ids: &[String]) -> Option<usize> {
-    ids.iter().position(|id| id.starts_with(gold_id)).map(|i| i + 1)
+    ids.iter()
+        .position(|id| id.starts_with(gold_id))
+        .map(|i| i + 1)
 }
 
 // ---- gold mode ---------------------------------------------------------------
 
-pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Option<f64>) -> Result<bool> {
+pub fn run_gold(
+    client: &EvalClient,
+    pairs: &[GoldPair],
+    k: usize,
+    min_mrr: Option<f64>,
+) -> Result<bool> {
     let mut overall = BucketMetrics::default();
     let mut by_bucket: std::collections::HashMap<Bucket, BucketMetrics> = Default::default();
     let mut latencies: Vec<f64> = Vec::new();
@@ -284,7 +327,10 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = latencies.get(latencies.len() / 2).copied().unwrap_or(0.0);
 
-    println!("gold eval: {} pairs, k={k}, server p50 {p50:.2}ms", pairs.len());
+    println!(
+        "gold eval: {} pairs, k={k}, server p50 {p50:.2}ms",
+        pairs.len()
+    );
     println!("  {}", overall.line("overall"));
     for bucket in [Bucket::Identifier, Bucket::Conceptual, Bucket::Mixed] {
         if let Some(m) = by_bucket.get(&bucket) {
@@ -316,7 +362,10 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
 const BURST_THRESHOLD: usize = 5;
 
 /// Drop entries that fall in bursty seconds. Returns (kept, dropped_count).
-fn drop_bursts<T>(entries: Vec<T>, ts_of: impl Fn(&T) -> chrono::DateTime<chrono::Utc>) -> (Vec<T>, usize) {
+fn drop_bursts<T>(
+    entries: Vec<T>,
+    ts_of: impl Fn(&T) -> chrono::DateTime<chrono::Utc>,
+) -> (Vec<T>, usize) {
     let mut per_sec: std::collections::HashMap<i64, usize> = Default::default();
     for e in &entries {
         *per_sec.entry(ts_of(e).timestamp()).or_default() += 1;
@@ -342,13 +391,14 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
     if !ratings.is_empty() {
         let by_id: std::collections::HashMap<&str, &LoggedSearch> =
             raw_searches.iter().map(|s| (s.id.as_str(), s)).collect();
-        let (hits, partials, misses) = ratings.iter().fold((0, 0, 0), |(h, p, m), r| {
-            match r.rating.as_str() {
-                "hit" => (h + 1, p, m),
-                "partial" => (h, p + 1, m),
-                _ => (h, p, m + 1),
-            }
-        });
+        let (hits, partials, misses) =
+            ratings
+                .iter()
+                .fold((0, 0, 0), |(h, p, m), r| match r.rating.as_str() {
+                    "hit" => (h + 1, p, m),
+                    "partial" => (h, p + 1, m),
+                    _ => (h, p, m + 1),
+                });
         ratings_summary.push(format!(
             "explicit ratings ({}): {hits} hit, {partials} partial, {misses} miss",
             ratings.len()
@@ -357,7 +407,9 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
         let mut rated_taped = BucketMetrics::default();
         let mut rated_fresh = BucketMetrics::default();
         for r in &ratings {
-            let Some(search) = by_id.get(r.search_id.as_str()) else { continue };
+            let Some(search) = by_id.get(r.search_id.as_str()) else {
+                continue;
+            };
             for used in &r.used_episode_ids {
                 let taped_rank = search
                     .results
@@ -416,9 +468,7 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
     for access in &accesses {
         let candidate = searches
             .iter()
-            .filter(|s| {
-                s.ts <= access.ts && (access.ts - s.ts).num_seconds() <= window_secs
-            })
+            .filter(|s| s.ts <= access.ts && (access.ts - s.ts).num_seconds() <= window_secs)
             .max_by_key(|s| s.ts);
         if let Some(search) = candidate
             && seen.insert((search.query.clone(), access.episode_id.clone()))
@@ -451,8 +501,12 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
             "  {:?} -> {} | taped rank {} | now {}",
             truncate(&search.query, 48),
             &access.episode_id[..8],
-            logged_rank.map(|r| r.to_string()).unwrap_or_else(|| "MISS".into()),
-            fresh_rank.map(|r| r.to_string()).unwrap_or_else(|| "MISS".into()),
+            logged_rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "MISS".into()),
+            fresh_rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "MISS".into()),
         );
     }
     println!("  {}", logged.line("as-taped"));
@@ -475,13 +529,19 @@ mod tests {
     #[test]
     fn classify_buckets() {
         assert_eq!(classify("gavel reviewed signal PR 198"), Bucket::Identifier);
-        assert_eq!(classify("aws account 842478712031 survivor"), Bucket::Identifier);
+        assert_eq!(
+            classify("aws account 842478712031 survivor"),
+            Bucket::Identifier
+        );
         assert_eq!(classify("DUCKDB_PATH split brain"), Bucket::Identifier);
         assert_eq!(
             classify("saved a memory but later sessions cannot find it anywhere"),
             Bucket::Conceptual
         );
-        assert_eq!(classify("how do I restore a demoted episode"), Bucket::Conceptual);
+        assert_eq!(
+            classify("how do I restore a demoted episode"),
+            Bucket::Conceptual
+        );
         assert_eq!(
             classify("nightly job hangs with error ECPHORY_DB unset"),
             Bucket::Mixed
@@ -531,7 +591,11 @@ mod tests {
     fn gold_parsing_with_comments() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gold.jsonl");
-        std::fs::write(&path, "# comment\n\n{\"query\":\"q1\",\"id\":\"abc\"}\n{\"query\":\"q2\",\"id\":\"def\"}\n").unwrap();
+        std::fs::write(
+            &path,
+            "# comment\n\n{\"query\":\"q1\",\"id\":\"abc\"}\n{\"query\":\"q2\",\"id\":\"def\"}\n",
+        )
+        .unwrap();
         let pairs = parse_gold(&path).unwrap();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[1].id, "def");

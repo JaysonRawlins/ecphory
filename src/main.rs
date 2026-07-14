@@ -184,8 +184,7 @@ fn db_path(cli_flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -194,8 +193,18 @@ fn main() -> anyhow::Result<()> {
 
     // Eval is HTTP-only by design: it scores the live daemon's real client
     // path and must never open the store (redb's lock is process-exclusive).
-    if let Command::Eval { gold, from_log, url, k, min_mrr, window } = &cli.command {
-        let token = std::env::var("ECPHORY_AUTH_TOKEN").ok().filter(|t| !t.is_empty());
+    if let Command::Eval {
+        gold,
+        from_log,
+        url,
+        k,
+        min_mrr,
+        window,
+    } = &cli.command
+    {
+        let token = std::env::var("ECPHORY_AUTH_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
         let client = eval::EvalClient::new(url.clone(), token);
         let mut ok = true;
         if let Some(gold_path) = gold {
@@ -217,7 +226,13 @@ fn main() -> anyhow::Result<()> {
     let mut svc = Ecphory::open(db_path(cli.db)?)?;
 
     match cli.command {
-        Command::Add { content, name, source, phrases, tags } => {
+        Command::Add {
+            content,
+            name,
+            source,
+            phrases,
+            tags,
+        } => {
             let mut ep = Episode::new(content, source);
             ep.name = name;
             ep.search_phrases = phrases;
@@ -225,10 +240,24 @@ fn main() -> anyhow::Result<()> {
             svc.insert(&ep)?;
             println!("{}", serde_json::to_string_pretty(&ep)?);
         }
-        Command::Search { query, limit, include_deleted, group, source, tags, brief } => {
+        Command::Search {
+            query,
+            limit,
+            include_deleted,
+            group,
+            source,
+            tags,
+            brief,
+        } => {
             let out = svc.search(
                 &query,
-                &SearchOptions { limit, include_deleted, group_id: group, source, tags },
+                &SearchOptions {
+                    limit,
+                    include_deleted,
+                    group_id: group,
+                    source,
+                    tags,
+                },
             )?;
             if brief {
                 eprintln!(
@@ -272,15 +301,32 @@ fn main() -> anyhow::Result<()> {
             let ep = svc.get(&id)?;
             println!("{}", serde_json::to_string_pretty(&ep)?);
         }
-        Command::List { limit, include_deleted } => {
-            let eps = svc.list(ListOptions { limit, include_deleted, ..Default::default() })?;
+        Command::List {
+            limit,
+            include_deleted,
+        } => {
+            let eps = svc.list(ListOptions {
+                limit,
+                include_deleted,
+                ..Default::default()
+            })?;
             println!("{}", serde_json::to_string_pretty(&eps)?);
         }
-        Command::Update { id, content, name, phrases, tags } => {
+        Command::Update {
+            id,
+            content,
+            name,
+            phrases,
+            tags,
+        } => {
             let params = UpdateParams {
                 content,
                 name,
-                search_phrases: if phrases.is_empty() { None } else { Some(phrases) },
+                search_phrases: if phrases.is_empty() {
+                    None
+                } else {
+                    Some(phrases)
+                },
                 tags: if tags.is_empty() { None } else { Some(tags) },
                 ..Default::default()
             };
@@ -316,7 +362,11 @@ fn main() -> anyhow::Result<()> {
         Command::Export { dir, commit } => {
             let episodes = svc.export_all()?;
             let outcome = export::write_mirror(&episodes, &dir)?;
-            let committed = if commit { export::git_commit(&dir, "ecphory export")? } else { false };
+            let committed = if commit {
+                export::git_commit(&dir, "ecphory export")?
+            } else {
+                false
+            };
             println!(
                 "exported {} episodes: {} written, {} unchanged, committed={committed}",
                 episodes.len(),
@@ -327,7 +377,10 @@ fn main() -> anyhow::Result<()> {
         Command::Reindex => {
             let started = std::time::Instant::now();
             let n = svc.reindex()?;
-            println!("reindexed {n} episodes in {:.2}s", started.elapsed().as_secs_f64());
+            println!(
+                "reindexed {n} episodes in {:.2}s",
+                started.elapsed().as_secs_f64()
+            );
         }
         Command::Status => {
             println!("episodes: {}", svc.count()?);
@@ -364,7 +417,10 @@ fn main() -> anyhow::Result<()> {
                         .map(|id| &id[..8.min(id.len())])
                         .collect::<Vec<_>>()
                         .join(", "),
-                    e.note.as_deref().map(|n| format!("  — {n}")).unwrap_or_default()
+                    e.note
+                        .as_deref()
+                        .map(|n| format!("  — {n}"))
+                        .unwrap_or_default()
                 );
             }
         }
@@ -373,7 +429,11 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Serve { port } => {
             let port = port
-                .or_else(|| std::env::var("ECPHORY_PORT").ok().and_then(|p| p.parse().ok()))
+                .or_else(|| {
+                    std::env::var("ECPHORY_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                })
                 .unwrap_or(3491);
             mcp::serve_http(svc, port)?;
         }

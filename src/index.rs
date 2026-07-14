@@ -3,8 +3,8 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value,
-    STORED, STRING,
+    Field, IndexRecordOption, STORED, STRING, Schema, TantivyDocument, TextFieldIndexing,
+    TextOptions, Value,
 };
 use tantivy::{Index, IndexWriter, Term};
 
@@ -68,7 +68,9 @@ impl SearchIndex {
         let index = match Index::open_or_create(mmap, schema.clone()) {
             Ok(index) => index,
             Err(open_err) => {
-                tracing::warn!("index schema mismatch ({open_err}); wiping derived index for rebuild");
+                tracing::warn!(
+                    "index schema mismatch ({open_err}); wiping derived index for rebuild"
+                );
                 std::fs::remove_dir_all(&dir)
                     .and_then(|_| std::fs::create_dir_all(&dir))
                     .map_err(|e| Error::Storage(format!("resetting index dir: {e}")))?;
@@ -252,11 +254,17 @@ mod tests {
             ep("unrelated", "tailscale mosh phone blink headless ssh"),
         ]);
         let hits = idx
-            .search("granted keychain fix -25308 user interaction not allowed", 5, false)
+            .search(
+                "granted keychain fix -25308 user interaction not allowed",
+                5,
+                false,
+            )
             .unwrap();
         assert!(!hits.is_empty());
         let top = &hits[0];
-        let target = idx.search("granted keychain to file-backend", 1, false).unwrap()[0]
+        let target = idx
+            .search("granted keychain to file-backend", 1, false)
+            .unwrap()[0]
             .id
             .clone();
         assert_eq!(top.id, target, "dash token must match, not exclude");
@@ -265,10 +273,15 @@ mod tests {
     #[test]
     fn cli_flag_tokens_match() {
         let idx = indexed(&[
-            ep("ghostty naming", "pair the terminal tab via claude --name pid"),
+            ep(
+                "ghostty naming",
+                "pair the terminal tab via claude --name pid",
+            ),
             ep("other", "completely different content about databases"),
         ]);
-        let hits = idx.search("Ghostty --name pid terminal tab", 5, false).unwrap();
+        let hits = idx
+            .search("Ghostty --name pid terminal tab", 5, false)
+            .unwrap();
         assert!(!hits.is_empty());
         // Before the fix this query returned only the non-matching doc set.
         let top_doc = &hits[0];
@@ -304,9 +317,13 @@ mod tests {
             "the release page has nothing to download today",
         );
         let idx = indexed(&[with_phrase, content_only]);
-        let hits = idx.search("release page has nothing to download", 2, false).unwrap();
+        let hits = idx
+            .search("release page has nothing to download", 2, false)
+            .unwrap();
         assert_eq!(hits.len(), 2);
-        let name_of_top = idx.search("ep-with-phrase", 1, false).unwrap()[0].id.clone();
+        let name_of_top = idx.search("ep-with-phrase", 1, false).unwrap()[0]
+            .id
+            .clone();
         assert_eq!(
             hits[0].id, name_of_top,
             "a search_phrases match must outrank an incidental content match"

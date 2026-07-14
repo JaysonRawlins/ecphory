@@ -11,7 +11,9 @@ pub enum Error {
     // Constructed by the MCP delete handler (M4); the store itself never
     // hard-deletes on the agent path.
     #[allow(dead_code)]
-    #[error("agents may not hard-delete; demote instead (deletion is tiering, use the operator CLI to purge)")]
+    #[error(
+        "agents may not hard-delete; demote instead (deletion is tiering, use the operator CLI to purge)"
+    )]
     HardDeleteRefused,
 
     #[error("storage error: {0}")]

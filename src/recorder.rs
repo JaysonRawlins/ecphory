@@ -67,7 +67,9 @@ impl std::str::FromStr for Rating {
             "hit" => Ok(Rating::Hit),
             "partial" => Ok(Rating::Partial),
             "miss" => Ok(Rating::Miss),
-            other => Err(format!("invalid rating {other:?} (expected hit|partial|miss)")),
+            other => Err(format!(
+                "invalid rating {other:?} (expected hit|partial|miss)"
+            )),
         }
     }
 }
@@ -170,8 +172,10 @@ pub fn compute_stats(
         *counts.entry(s.query.as_str()).or_default() += 1;
     }
     let unique_queries = counts.len();
-    let mut top: Vec<(String, usize)> =
-        counts.into_iter().map(|(q, n)| (q.to_string(), n)).collect();
+    let mut top: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(q, n)| (q.to_string(), n))
+        .collect();
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(10);
 
@@ -189,7 +193,10 @@ pub fn compute_stats(
         top_queries: top,
         rated: ratings.len(),
         rated_hit: ratings.iter().filter(|r| r.rating == Rating::Hit).count(),
-        rated_partial: ratings.iter().filter(|r| r.rating == Rating::Partial).count(),
+        rated_partial: ratings
+            .iter()
+            .filter(|r| r.rating == Rating::Partial)
+            .count(),
         rated_miss: ratings.iter().filter(|r| r.rating == Rating::Miss).count(),
     }
 }
@@ -197,7 +204,10 @@ pub fn compute_stats(
 /// Reads the recorder opt-out. Recording is on unless explicitly disabled.
 pub fn recording_enabled() -> bool {
     !matches!(
-        std::env::var("ECPHORY_SEARCH_LOG").unwrap_or_default().to_lowercase().as_str(),
+        std::env::var("ECPHORY_SEARCH_LOG")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
         "off" | "false" | "0" | "disabled"
     )
 }

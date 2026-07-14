@@ -42,10 +42,16 @@ pub fn build_router(state: Shared) -> Router {
         .route("/status", get(status))
         .route("/admin/import", post(admin_import))
         .route("/admin/export", post(admin_export))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_auth));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
 
     Router::new()
-        .route("/health", get(|| async { Json(json!({"status": "healthy"})) }))
+        .route(
+            "/health",
+            get(|| async { Json(json!({"status": "healthy"})) }),
+        )
         .nest("/api/v1", data_plane)
         .with_state(state)
 }
@@ -81,7 +87,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn err(code: StatusCode, message: impl Into<String>) -> Response {
-    (code, Json(json!({"success": false, "error": message.into()}))).into_response()
+    (
+        code,
+        Json(json!({"success": false, "error": message.into()})),
+    )
+        .into_response()
 }
 
 fn map_err(e: crate::error::Error) -> Response {
@@ -117,7 +127,11 @@ struct AddMemoryBody {
 }
 
 async fn add_memory(State(state): State<Shared>, Json(body): Json<AddMemoryBody>) -> Response {
-    let source = if body.source.is_empty() { "http".to_string() } else { body.source };
+    let source = if body.source.is_empty() {
+        "http".to_string()
+    } else {
+        body.source
+    };
     let mut ep = Episode::new(body.content, source);
     ep.name = none_if_empty(body.name);
     ep.search_phrases = body.search_phrases;
@@ -131,7 +145,11 @@ async fn add_memory(State(state): State<Shared>, Json(body): Json<AddMemoryBody>
 
     let mut svc = state.svc.lock().expect("service lock");
     match svc.insert(&ep) {
-        Ok(()) => (StatusCode::CREATED, Json(json!({"success": true, "episode": ep}))).into_response(),
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(json!({"success": true, "episode": ep})),
+        )
+            .into_response(),
         Err(e) => map_err(e),
     }
 }
@@ -163,10 +181,19 @@ struct SearchQuery {
 async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Response {
     let tags = q
         .tags
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let opts = SearchOptions {
-        limit: if q.max_results == 0 { 10 } else { q.max_results },
+        limit: if q.max_results == 0 {
+            10
+        } else {
+            q.max_results
+        },
         include_deleted: q.include_deleted,
         group_id: q.group_id.filter(|s| !s.is_empty()),
         source: q.source.filter(|s| !s.is_empty()),
@@ -208,7 +235,11 @@ struct ListQuery {
 async fn list_episodes(State(state): State<Shared>, Query(q): Query<ListQuery>) -> Response {
     let svc = state.svc.lock().expect("service lock");
     match svc.list(ListOptions {
-        limit: if q.max_results == 0 { 10 } else { q.max_results },
+        limit: if q.max_results == 0 {
+            10
+        } else {
+            q.max_results
+        },
         include_deleted: q.include_deleted,
         ..Default::default()
     }) {
@@ -231,7 +262,11 @@ async fn get_episode(
     Query(q): Query<GetQuery>,
 ) -> Response {
     let svc = state.svc.lock().expect("service lock");
-    let result = if q.no_record { svc.get_unrecorded(&id) } else { svc.get(&id) };
+    let result = if q.no_record {
+        svc.get_unrecorded(&id)
+    } else {
+        svc.get(&id)
+    };
     match result {
         Ok(ep) => Json(ep).into_response(),
         Err(e) => map_err(e),
@@ -263,10 +298,22 @@ async fn update_episode(
         UpdateParams {
             content: none_if_empty(body.content),
             name: none_if_empty(body.name),
-            search_phrases: if body.search_phrases.is_empty() { None } else { Some(body.search_phrases) },
-            tags: if body.tags.is_empty() { None } else { Some(body.tags) },
+            search_phrases: if body.search_phrases.is_empty() {
+                None
+            } else {
+                Some(body.search_phrases)
+            },
+            tags: if body.tags.is_empty() {
+                None
+            } else {
+                Some(body.tags)
+            },
             expired_at: None,
-            metadata: if body.metadata.is_null() { None } else { Some(body.metadata) },
+            metadata: if body.metadata.is_null() {
+                None
+            } else {
+                Some(body.metadata)
+            },
         },
     ) {
         Ok(ep) => Json(ep).into_response(),
@@ -361,9 +408,11 @@ async fn rate_search(State(state): State<Shared>, Json(body): Json<RateSearchBod
         body.intended_episode_ids,
         none_if_empty(body.note),
     ) {
-        Ok(entry) => {
-            (StatusCode::CREATED, Json(json!({"success": true, "rating": entry}))).into_response()
-        }
+        Ok(entry) => (
+            StatusCode::CREATED,
+            Json(json!({"success": true, "rating": entry})),
+        )
+            .into_response(),
         Err(e) => map_err(e),
     }
 }
@@ -418,7 +467,12 @@ async fn admin_export(State(state): State<Shared>, Json(body): Json<ExportBody>)
     let dir = if body.dir.is_empty() {
         match std::env::var("ECPHORY_EXPORT_DIR") {
             Ok(d) if !d.is_empty() => d,
-            _ => return err(StatusCode::BAD_REQUEST, "no dir given and ECPHORY_EXPORT_DIR unset"),
+            _ => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "no dir given and ECPHORY_EXPORT_DIR unset",
+                );
+            }
         }
     } else {
         body.dir

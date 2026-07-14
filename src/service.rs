@@ -74,7 +74,15 @@ impl Ecphory {
         // the index dir is new (or was deleted for recovery) — rebuild now so
         // search is never silently empty. (FTS warm-start lesson from engram.)
         if store.count()? > 0 && index.search("*", 1, true)?.is_empty() {
-            index.rebuild(store.list(ListOptions { include_deleted: true, include_expired: true, limit: 0 })?.iter())?;
+            index.rebuild(
+                store
+                    .list(ListOptions {
+                        include_deleted: true,
+                        include_expired: true,
+                        limit: 0,
+                    })?
+                    .iter(),
+            )?;
         }
 
         // Recorder maintenance at open: prune past retention. Never fatal.
@@ -83,7 +91,11 @@ impl Ecphory {
             tracing::warn!("recorder prune failed: {e}");
         }
 
-        Ok(Self { store, index, recording })
+        Ok(Self {
+            store,
+            index,
+            recording,
+        })
     }
 
     pub fn insert(&mut self, ep: &Episode) -> Result<()> {
@@ -131,7 +143,11 @@ impl Ecphory {
 
     /// Every episode, including demoted and expired — the export set.
     pub fn export_all(&self) -> Result<Vec<Episode>> {
-        self.store.list(ListOptions { include_deleted: true, include_expired: true, limit: 0 })
+        self.store.list(ListOptions {
+            include_deleted: true,
+            include_expired: true,
+            limit: 0,
+        })
     }
 
     pub fn list(&self, opts: ListOptions) -> Result<Vec<Episode>> {
@@ -190,7 +206,12 @@ impl Ecphory {
         self.search_impl(query, opts, false)
     }
 
-    fn search_impl(&self, query: &str, opts: &SearchOptions, record: bool) -> Result<SearchOutcome> {
+    fn search_impl(
+        &self,
+        query: &str,
+        opts: &SearchOptions,
+        record: bool,
+    ) -> Result<SearchOutcome> {
         let started = Instant::now();
         let limit = if opts.limit == 0 { 10 } else { opts.limit };
         let overfetch = (limit * 4).max(50);
@@ -222,14 +243,21 @@ impl Ecphory {
                 continue;
             }
             let rank = results.len() + 1;
-            results.push(SearchResult { episode: ep, score: hit.score, rank });
+            results.push(SearchResult {
+                episode: ep,
+                score: hit.score,
+                rank,
+            });
             if results.len() >= limit {
                 break;
             }
         }
 
-        let mut outcome =
-            SearchOutcome { results, latency_us: started.elapsed().as_micros(), search_id: None };
+        let mut outcome = SearchOutcome {
+            results,
+            latency_us: started.elapsed().as_micros(),
+            search_id: None,
+        };
 
         // Record the search. Empty queries are browses, not retrieval events;
         // logging them would drown the workload signal.
@@ -331,7 +359,11 @@ impl Ecphory {
         }
 
         let normalized = query.trim().to_lowercase();
-        if ep.search_phrases.iter().any(|p| p.trim().to_lowercase() == normalized) {
+        if ep
+            .search_phrases
+            .iter()
+            .any(|p| p.trim().to_lowercase() == normalized)
+        {
             return mk(&id, CorrectionAction::DuplicatePhrase, before, None);
         }
         if ep.search_phrases.len() >= MAX_SEARCH_PHRASES {
@@ -341,7 +373,13 @@ impl Ecphory {
         let mut phrases = ep.search_phrases.clone();
         phrases.push(query.trim().to_string());
         if self
-            .update(&id, UpdateParams { search_phrases: Some(phrases), ..Default::default() })
+            .update(
+                &id,
+                UpdateParams {
+                    search_phrases: Some(phrases),
+                    ..Default::default()
+                },
+            )
             .is_err()
         {
             return mk(&id, CorrectionAction::TargetNotFound, before, None);
@@ -359,9 +397,15 @@ impl Ecphory {
     /// Rank (1-based) of `id` for `query` within CORRECTION_K, unrecorded so
     /// correction probes never pollute the workload tape.
     fn rank_of_unrecorded(&self, query: &str, id: &str) -> Option<usize> {
-        let opts = SearchOptions { limit: CORRECTION_K, ..Default::default() };
+        let opts = SearchOptions {
+            limit: CORRECTION_K,
+            ..Default::default()
+        };
         let out = self.search_unrecorded(query, &opts).ok()?;
-        out.results.iter().find(|r| r.episode.id.to_string() == id).map(|r| r.rank)
+        out.results
+            .iter()
+            .find(|r| r.episode.id.to_string() == id)
+            .map(|r| r.rank)
     }
 
     pub fn recent_searches(&self, limit: usize) -> Result<Vec<SearchLogEntry>> {
@@ -401,10 +445,14 @@ mod tests {
     #[test]
     fn search_finds_by_content() {
         let (mut svc, _d) = temp();
-        svc.insert(&ep("the gavel daemon approves bash commands")).unwrap();
-        svc.insert(&ep("duckdb stores episodes in a single file")).unwrap();
+        svc.insert(&ep("the gavel daemon approves bash commands"))
+            .unwrap();
+        svc.insert(&ep("duckdb stores episodes in a single file"))
+            .unwrap();
 
-        let out = svc.search("duckdb single file", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search("duckdb single file", &SearchOptions::default())
+            .unwrap();
         assert_eq!(out.results.len(), 1);
         assert!(out.results[0].episode.content.contains("duckdb"));
         assert!(out.latency_us > 0);
@@ -426,7 +474,10 @@ mod tests {
         svc.insert(&target).unwrap();
 
         let out = svc
-            .search("nightly data extraction job times out no error", &SearchOptions::default())
+            .search(
+                "nightly data extraction job times out no error",
+                &SearchOptions::default(),
+            )
             .unwrap();
         assert!(!out.results.is_empty());
         assert_eq!(
@@ -440,8 +491,11 @@ mod tests {
         // First dogfood divergence: DuckDB FTS stems, tantivy default
         // didn't, so "finding memories" missed "finds the memory".
         let (mut svc, _d) = temp();
-        svc.insert(&ep("the session finds the memory quickly and saves it")).unwrap();
-        let out = svc.search("finding saved memories", &SearchOptions::default()).unwrap();
+        svc.insert(&ep("the session finds the memory quickly and saves it"))
+            .unwrap();
+        let out = svc
+            .search("finding saved memories", &SearchOptions::default())
+            .unwrap();
         assert_eq!(out.results.len(), 1, "stemmed variants should match");
     }
 
@@ -450,8 +504,13 @@ mod tests {
         // engram needed an ILIKE fallback because DuckDB FTS can't index pure
         // numeric tokens; tantivy must not share that gap.
         let (mut svc, _d) = temp();
-        svc.insert(&ep("AWS account 842478712031 is the org management survivor")).unwrap();
-        let out = svc.search("842478712031", &SearchOptions::default()).unwrap();
+        svc.insert(&ep(
+            "AWS account 842478712031 is the org management survivor",
+        ))
+        .unwrap();
+        let out = svc
+            .search("842478712031", &SearchOptions::default())
+            .unwrap();
         assert_eq!(out.results.len(), 1);
     }
 
@@ -466,7 +525,13 @@ mod tests {
         assert!(out.results.is_empty());
 
         let out = svc
-            .search("zebras", &SearchOptions { include_deleted: true, ..Default::default() })
+            .search(
+                "zebras",
+                &SearchOptions {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(out.results.len(), 1);
     }
@@ -478,12 +543,26 @@ mod tests {
         svc.insert(&e).unwrap();
         svc.update(
             &e.id.to_string(),
-            UpdateParams { content: Some("revised text about wombats".into()), ..Default::default() },
+            UpdateParams {
+                content: Some("revised text about wombats".into()),
+                ..Default::default()
+            },
         )
         .unwrap();
 
-        assert!(svc.search("quokkas", &SearchOptions::default()).unwrap().results.is_empty());
-        assert_eq!(svc.search("wombats", &SearchOptions::default()).unwrap().results.len(), 1);
+        assert!(
+            svc.search("quokkas", &SearchOptions::default())
+                .unwrap()
+                .results
+                .is_empty()
+        );
+        assert_eq!(
+            svc.search("wombats", &SearchOptions::default())
+                .unwrap()
+                .results
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -499,7 +578,10 @@ mod tests {
         let out = svc
             .search(
                 "kubernetes cluster",
-                &SearchOptions { tags: vec!["runbook".into()], ..Default::default() },
+                &SearchOptions {
+                    tags: vec!["runbook".into()],
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(out.results.len(), 1);
@@ -508,7 +590,10 @@ mod tests {
         let out = svc
             .search(
                 "kubernetes cluster",
-                &SearchOptions { source: Some("other-source".into()), ..Default::default() },
+                &SearchOptions {
+                    source: Some("other-source".into()),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(out.results.len(), 1);
@@ -551,7 +636,9 @@ mod tests {
         svc.insert(&e).unwrap();
 
         let out = svc.search("narwhals", &SearchOptions::default()).unwrap();
-        let search_id = out.search_id.expect("recorded search must return search_id");
+        let search_id = out
+            .search_id
+            .expect("recorded search must return search_id");
 
         let entry = svc
             .rate_search(
@@ -567,12 +654,16 @@ mod tests {
 
         let ratings = svc.recent_ratings(10).unwrap();
         assert_eq!(ratings.len(), 1);
-        assert_eq!(ratings[0].used_episode_ids, vec![e.id.to_string()[..8].to_string()]);
+        assert_eq!(
+            ratings[0].used_episode_ids,
+            vec![e.id.to_string()[..8].to_string()]
+        );
 
         // Garbage search_id is refused — the rating stream stays joinable.
-        assert!(svc
-            .rate_search("not-a-real-search", Rating::Miss, vec![], vec![], None)
-            .is_err());
+        assert!(
+            svc.rate_search("not-a-real-search", Rating::Miss, vec![], vec![], None)
+                .is_err()
+        );
 
         let s = svc.stats().unwrap();
         assert_eq!(s.rated, 1);
@@ -586,9 +677,12 @@ mod tests {
         // Zero vocabulary overlap between query and target: guaranteed miss.
         let target = ep("circus animals marching through downtown streets");
         svc.insert(&target).unwrap();
-        svc.insert(&ep("unrelated decoy about database indexes")).unwrap();
+        svc.insert(&ep("unrelated decoy about database indexes"))
+            .unwrap();
 
-        let out = svc.search("purple elephant parade", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search("purple elephant parade", &SearchOptions::default())
+            .unwrap();
         assert!(out.results.is_empty());
         let sid = out.search_id.unwrap().to_string();
 
@@ -596,7 +690,13 @@ mod tests {
         // the same millisecond, and UUIDv7's timestamp prefix makes short
         // prefixes ambiguous between them.
         let entry = svc
-            .rate_search(&sid, Rating::Miss, vec![], vec![target.id.to_string()], None)
+            .rate_search(
+                &sid,
+                Rating::Miss,
+                vec![],
+                vec![target.id.to_string()],
+                None,
+            )
             .unwrap();
         assert_eq!(entry.corrections.len(), 1);
         let c = &entry.corrections[0];
@@ -606,7 +706,12 @@ mod tests {
 
         // The enrichment is durable: the query is now a search phrase.
         let ep_after = svc.get_unrecorded(&target.id.to_string()).unwrap();
-        assert!(ep_after.search_phrases.iter().any(|p| p == "purple elephant parade"));
+        assert!(
+            ep_after
+                .search_phrases
+                .iter()
+                .any(|p| p == "purple elephant parade")
+        );
     }
 
     #[test]
@@ -614,13 +719,20 @@ mod tests {
         let (mut svc, _d) = temp();
         let e = ep("straightforward content about lighthouses");
         svc.insert(&e).unwrap();
-        let out = svc.search("lighthouses", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search("lighthouses", &SearchOptions::default())
+            .unwrap();
         let sid = out.search_id.unwrap().to_string();
         let entry = svc
             .rate_search(&sid, Rating::Hit, vec![e.id.to_string()], vec![], None)
             .unwrap();
         assert!(entry.corrections.is_empty());
-        assert!(svc.get_unrecorded(&e.id.to_string()).unwrap().search_phrases.is_empty());
+        assert!(
+            svc.get_unrecorded(&e.id.to_string())
+                .unwrap()
+                .search_phrases
+                .is_empty()
+        );
     }
 
     #[test]
@@ -628,7 +740,9 @@ mod tests {
         let (mut svc, _d) = temp();
         let e = ep("alpha bravo charlie delta");
         svc.insert(&e).unwrap();
-        let out = svc.search("alpha bravo", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search("alpha bravo", &SearchOptions::default())
+            .unwrap();
         let sid = out.search_id.unwrap().to_string();
         // Partial rating (say, the answer needed a second episode too) must
         // not enrich a target that already ranks.
@@ -636,42 +750,74 @@ mod tests {
             .rate_search(&sid, Rating::Partial, vec![], vec![e.id.to_string()], None)
             .unwrap();
         assert_eq!(entry.corrections[0].action, CorrectionAction::AlreadyRanks);
-        assert!(svc.get_unrecorded(&e.id.to_string()).unwrap().search_phrases.is_empty());
+        assert!(
+            svc.get_unrecorded(&e.id.to_string())
+                .unwrap()
+                .search_phrases
+                .is_empty()
+        );
     }
 
     #[test]
     fn phrase_cap_blocks_enrichment() {
         let (mut svc, _d) = temp();
         let mut e = ep("content sharing nothing with the query vocabulary");
-        e.search_phrases = (0..8).map(|i| format!("existing phrase number {i}")).collect();
+        e.search_phrases = (0..8)
+            .map(|i| format!("existing phrase number {i}"))
+            .collect();
         svc.insert(&e).unwrap();
-        let out = svc.search("zebra quantum harmonica", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search("zebra quantum harmonica", &SearchOptions::default())
+            .unwrap();
         let sid = out.search_id.unwrap().to_string();
         let entry = svc
             .rate_search(&sid, Rating::Miss, vec![], vec![e.id.to_string()], None)
             .unwrap();
-        assert_eq!(entry.corrections[0].action, CorrectionAction::PhraseCapReached);
-        assert_eq!(svc.get_unrecorded(&e.id.to_string()).unwrap().search_phrases.len(), 8);
+        assert_eq!(
+            entry.corrections[0].action,
+            CorrectionAction::PhraseCapReached
+        );
+        assert_eq!(
+            svc.get_unrecorded(&e.id.to_string())
+                .unwrap()
+                .search_phrases
+                .len(),
+            8
+        );
     }
 
     #[test]
     fn unresolvable_target_is_reported_not_fatal() {
         let (mut svc, _d) = temp();
         svc.insert(&ep("anything at all")).unwrap();
-        let out = svc.search("no such thing here", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search("no such thing here", &SearchOptions::default())
+            .unwrap();
         let sid = out.search_id.unwrap().to_string();
         let entry = svc
-            .rate_search(&sid, Rating::Miss, vec![], vec!["ffffffff-0000".into()], None)
+            .rate_search(
+                &sid,
+                Rating::Miss,
+                vec![],
+                vec!["ffffffff-0000".into()],
+                None,
+            )
             .unwrap();
-        assert_eq!(entry.corrections[0].action, CorrectionAction::TargetNotFound);
+        assert_eq!(
+            entry.corrections[0].action,
+            CorrectionAction::TargetNotFound
+        );
     }
 
     #[test]
     fn unrecorded_search_leaves_no_tape_and_no_search_id() {
         let (mut svc, _d) = temp();
-        svc.insert(&ep("stealth search fodder about ocelots")).unwrap();
+        svc.insert(&ep("stealth search fodder about ocelots"))
+            .unwrap();
 
-        let out = svc.search_unrecorded("ocelots", &SearchOptions::default()).unwrap();
+        let out = svc
+            .search_unrecorded("ocelots", &SearchOptions::default())
+            .unwrap();
         assert_eq!(out.results.len(), 1);
         assert!(out.search_id.is_none());
         assert!(svc.recent_searches(10).unwrap().is_empty());
@@ -705,7 +851,8 @@ mod tests {
         for _ in 0..4 {
             svc.search("capybaras", &SearchOptions::default()).unwrap();
         }
-        svc.search("no such thing anywhere", &SearchOptions::default()).unwrap();
+        svc.search("no such thing anywhere", &SearchOptions::default())
+            .unwrap();
 
         let s = svc.stats().unwrap();
         assert_eq!(s.searches, 5);
@@ -730,6 +877,10 @@ mod tests {
         std::fs::remove_dir_all(dir.path().join("index")).unwrap();
         let svc = Ecphory::open(&db).unwrap();
         let out = svc.search("pelicans", &SearchOptions::default()).unwrap();
-        assert_eq!(out.results.len(), 1, "cold-start rebuild should restore search");
+        assert_eq!(
+            out.results.len(),
+            1,
+            "cold-start rebuild should restore search"
+        );
     }
 }
