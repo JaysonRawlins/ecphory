@@ -16,6 +16,13 @@ pub enum Error {
     )]
     HardDeleteRefused,
 
+    // Two-phase delete guard: purge destroys only what demote already hid.
+    // There is deliberately no --force path around this.
+    #[error(
+        "episode {0} is not demoted; purge only destroys demoted episodes (run `ecphory demote {0}` first)"
+    )]
+    NotDemoted(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 

@@ -184,6 +184,44 @@ impl Store {
         })
     }
 
+    /// Hard-delete a DEMOTED episode: the record and its entire archived
+    /// version history, in one write transaction. Refuses episodes that are
+    /// not already demoted (two-phase delete; no force path) — the operator
+    /// purge CLI is the only caller. Returns the purged episode and the
+    /// number of archived versions removed.
+    pub fn purge(&self, id_or_prefix: &str) -> Result<(Episode, usize)> {
+        let id = self.resolve_id(id_or_prefix)?;
+        let key = id.to_string();
+        let tx = self.db.begin_write()?;
+        let (episode, versions_removed) = {
+            let mut table = tx.open_table(EPISODES)?;
+            let episode: Episode = match table.get(key.as_str())? {
+                Some(guard) => serde_json::from_slice(guard.value())?,
+                None => return Err(Error::NotFound(id_or_prefix.to_string())),
+            };
+            if !episode.is_deleted() {
+                return Err(Error::NotDemoted(key));
+            }
+            table.remove(key.as_str())?;
+
+            let mut vtable = tx.open_table(VERSIONS)?;
+            let prefix = format!("{id}/");
+            let stale: Vec<String> = vtable
+                .range(prefix.as_str()..)?
+                .filter_map(|e| e.ok())
+                .map(|(k, _)| k.value().to_string())
+                .take_while(|k| k.starts_with(prefix.as_str()))
+                .collect();
+            let versions_removed = stale.len();
+            for vkey in stale {
+                vtable.remove(vkey.as_str())?;
+            }
+            (episode, versions_removed)
+        };
+        tx.commit()?;
+        Ok((episode, versions_removed))
+    }
+
     /// Archived prior states, oldest first.
     pub fn versions(&self, id_or_prefix: &str) -> Result<Vec<EpisodeVersion>> {
         let id = self.resolve_id(id_or_prefix)?;
@@ -513,6 +551,91 @@ mod tests {
         let versions = store.versions(&ep.id.to_string()).unwrap();
         let ops: Vec<&str> = versions.iter().map(|v| v.operation.as_str()).collect();
         assert_eq!(ops, vec!["delete", "restore"]);
+    }
+
+    #[test]
+    fn purge_refuses_non_demoted() {
+        let (store, _dir) = temp_store();
+        let ep = sample("still live");
+        store.insert(&ep).unwrap();
+
+        match store.purge(&ep.id.to_string()) {
+            Err(Error::NotDemoted(id)) => assert_eq!(id, ep.id.to_string()),
+            other => panic!("expected NotDemoted, got {other:?}"),
+        }
+        // Refusal destroyed nothing.
+        assert!(store.get(&ep.id.to_string()).is_ok());
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn purge_removes_record_and_all_versions() {
+        let (store, _dir) = temp_store();
+        let ep = sample("purge me");
+        store.insert(&ep).unwrap();
+        store
+            .update(
+                &ep.id.to_string(),
+                UpdateParams {
+                    content: Some("revised".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.demote(&ep.id.to_string()).unwrap();
+        assert_eq!(store.versions(&ep.id.to_string()).unwrap().len(), 2);
+
+        let (purged, versions_removed) = store.purge(&ep.id.to_string()).unwrap();
+        assert_eq!(purged.id, ep.id);
+        assert_eq!(versions_removed, 2);
+
+        match store.get(&ep.id.to_string()) {
+            Err(Error::NotFound(_)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        // Full-UUID lookup bypasses the prefix scan, so versions() still
+        // runs — and must find nothing left behind.
+        assert!(store.versions(&ep.id.to_string()).unwrap().is_empty());
+        assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn purge_resolves_unique_prefix_and_refuses_ambiguous() {
+        let (store, _dir) = temp_store();
+        let a = sample("first sibling");
+        let b = sample("second sibling");
+        store.insert(&a).unwrap();
+        store.insert(&b).unwrap();
+        store.demote(&a.id.to_string()).unwrap();
+        store.demote(&b.id.to_string()).unwrap();
+
+        // UUIDv7 same-millisecond siblings share a long prefix; that shared
+        // prefix must be refused as ambiguous with nothing destroyed.
+        let a_str = a.id.to_string();
+        let b_str = b.id.to_string();
+        let shared: String = a_str
+            .chars()
+            .zip(b_str.chars())
+            .take_while(|(x, y)| x == y)
+            .map(|(x, _)| x)
+            .collect();
+        if !shared.is_empty() {
+            match store.purge(&shared) {
+                Err(Error::AmbiguousPrefix(_)) => {}
+                other => panic!("expected AmbiguousPrefix, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            store.count().unwrap(),
+            2,
+            "ambiguous prefix must destroy nothing"
+        );
+
+        // One character past the divergence point is unique — resolves.
+        let unique = &a_str[..shared.len() + 1];
+        let (purged, _) = store.purge(unique).unwrap();
+        assert_eq!(purged.id, a.id);
+        assert!(store.get(&b.id.to_string()).is_ok(), "sibling must survive");
     }
 
     #[test]

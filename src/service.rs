@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::index::{Hit, SearchIndex};
 use crate::model::{Episode, UpdateParams};
 use crate::recorder::{
@@ -42,6 +42,16 @@ pub struct SearchResult {
     pub episode: Episode,
     pub score: f32,
     pub rank: usize,
+}
+
+/// Everything a purge of one episode would destroy. Built read-only: the
+/// dry-run path assembles these and must mutate nothing, not even the
+/// access log (manifest reads are maintenance, not usage signal).
+#[derive(Debug)]
+pub struct PurgeManifest {
+    pub episode: Episode,
+    pub version_count: usize,
+    pub indexed: bool,
 }
 
 #[derive(Debug)]
@@ -203,6 +213,36 @@ impl Ecphory {
 
     pub fn versions(&self, id: &str) -> Result<Vec<crate::model::EpisodeVersion>> {
         self.store.versions(id)
+    }
+
+    /// Validate and describe one purge target without touching anything.
+    /// Refuses non-demoted episodes here too, so a dry run reports exactly
+    /// the same refusals an execute would.
+    pub fn purge_manifest(&self, id: &str) -> Result<PurgeManifest> {
+        let episode = self.store.get(id)?;
+        if !episode.is_deleted() {
+            return Err(Error::NotDemoted(episode.id.to_string()));
+        }
+        let canonical = episode.id.to_string();
+        let version_count = self.store.versions(&canonical)?.len();
+        let indexed = self.index.contains(&canonical)?;
+        Ok(PurgeManifest {
+            episode,
+            version_count,
+            indexed,
+        })
+    }
+
+    /// Hard-delete a demoted episode: store record + archived versions
+    /// (one transaction), then its index document. Store first — it is the
+    /// source of truth; a crash in between leaves a dangling index doc that
+    /// search already tolerates (the store join skips it) and reindex repairs.
+    /// Returns the purged episode and the number of versions destroyed.
+    pub fn purge(&mut self, id: &str) -> Result<(Episode, usize)> {
+        let (episode, versions_removed) = self.store.purge(id)?;
+        self.index.remove(&episode.id.to_string())?;
+        self.index.commit()?;
+        Ok((episode, versions_removed))
     }
 
     pub fn count(&self) -> Result<u64> {
@@ -1458,6 +1498,79 @@ mod tests {
             ("capybaras".to_string(), 1),
             "tagged replays must not inflate top_queries"
         );
+    }
+
+    #[test]
+    fn purge_manifest_refuses_non_demoted_and_destroys_nothing() {
+        let (mut svc, _d) = temp();
+        let e = ep("manifest fodder about ibexes");
+        svc.insert(&e).unwrap();
+
+        // Both the dry-run manifest and the execute path refuse a live episode.
+        match svc.purge_manifest(&e.id.to_string()) {
+            Err(Error::NotDemoted(id)) => assert_eq!(id, e.id.to_string()),
+            other => panic!("expected NotDemoted, got {other:?}"),
+        }
+        assert!(matches!(
+            svc.purge(&e.id.to_string()),
+            Err(Error::NotDemoted(_))
+        ));
+
+        svc.demote(&e.id.to_string()).unwrap();
+        let m = svc.purge_manifest(&e.id.to_string()).unwrap();
+        assert_eq!(m.episode.id, e.id);
+        assert_eq!(m.version_count, 1, "the demote archive");
+        assert!(m.indexed);
+
+        // The dry run destroyed nothing and left no usage signal.
+        assert!(svc.get_unrecorded(&e.id.to_string()).is_ok());
+        assert_eq!(svc.versions(&e.id.to_string()).unwrap().len(), 1);
+        let out = svc
+            .search(
+                "ibexes",
+                &SearchOptions {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert!(
+            svc.recent_accesses(10).unwrap().is_empty(),
+            "manifest reads must not pollute the access log"
+        );
+    }
+
+    #[test]
+    fn purge_removes_record_versions_and_index_docs() {
+        let (mut svc, _d) = temp();
+        let e = ep("purge target about dodos");
+        svc.insert(&e).unwrap();
+        svc.demote(&e.id.to_string()).unwrap();
+
+        let (purged, versions_removed) = svc.purge(&e.id.to_string()).unwrap();
+        assert_eq!(purged.id, e.id);
+        assert_eq!(versions_removed, 1);
+
+        assert!(svc.get_unrecorded(&e.id.to_string()).is_err());
+        assert!(svc.versions(&e.id.to_string()).unwrap().is_empty());
+        let out = svc
+            .search(
+                "dodos",
+                &SearchOptions {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            out.results.is_empty(),
+            "purged episode must not surface even with include_deleted"
+        );
+        assert!(matches!(
+            svc.purge_manifest(&e.id.to_string()),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[test]

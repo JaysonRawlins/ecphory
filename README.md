@@ -33,6 +33,38 @@ must earn its way in through the flight recorder.
    extension downloads at startup, no embedding daemon to silently fail, no
    cwd-relative database paths.
 
+## Deletion story
+
+Deletion is two-phase, and the phases have different owners:
+
+1. **Demote** — agent-safe, recoverable. `delete_episode` (MCP), `DELETE`
+   (REST), and `ecphory demote` soft-delete: the episode is hidden from
+   search and listings but still resolvable by id, and `restore` undoes it.
+   The prior state is archived first, so nothing an agent can do destroys
+   content.
+2. **Purge** — operator-only, destructive. `ecphory purge <id>...` is a CLI
+   command with no MCP or REST equivalent: agents may demote; only a human
+   at a terminal destroys. It refuses episodes that are not already demoted
+   (there is no `--force`), and it is a dry run by default — it prints a
+   manifest of everything that would be destroyed and executes only with
+   `--yes`. On execute it removes the episode record, its entire archived
+   version history, its search-index entries, and its file in the git
+   mirror (when `ECPHORY_EXPORT_DIR` is set); the mirror removal is
+   committed when the mirror is already a git repository, matching how the
+   daemon's scheduled export commits. The daemon holds the store lock, so
+   stop it before purging.
+
+**What purge cannot do** — the honest limits, for the leak-response case:
+flight-recorder rows that reference a purged id survive (they hold ids,
+ranks, and scores only — no content — and age out with recorder retention),
+and the git mirror's *history* still contains the episode content even
+after the file's removal is committed. If a purge is a response to leaked
+secrets, rewrite the mirror history with
+[git filter-repo](https://github.com/newren/git-filter-repo)
+(`git filter-repo --invert-paths --path <group_id>/<episode_id>.md`),
+force-push any remotes that carried it, and rotate the leaked credentials
+anyway — assume anything that ever reached a remote was read.
+
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (static musl — arm64,
