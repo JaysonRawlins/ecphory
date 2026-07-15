@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/JaysonRawlins/ecphory/compare/v0.3.3...v0.3.4) - 2026-07-15
+
+### Added
+
+- heal lifecycle — resolution state, replay regression pass, collateral check, source-tagged tape ([#11](https://github.com/JaysonRawlins/ecphory/pull/11))
+
 ## [0.3.3](https://github.com/JaysonRawlins/ecphory/compare/v0.3.2...v0.3.3) - 2026-07-14
 
 ### Added
