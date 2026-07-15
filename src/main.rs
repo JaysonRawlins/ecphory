@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::model::{Episode, UpdateParams};
-use crate::service::{Ecphory, SearchOptions};
+use crate::service::{Ecphory, PurgeManifest, SearchOptions};
 use crate::store::ListOptions;
 
 /// ecphory — recall, measured. A lexical-first memory store for AI agents.
@@ -90,6 +90,18 @@ enum Command {
     Demote { id: String },
     /// Restore a demoted episode
     Restore { id: String },
+    /// Operator hard-delete of DEMOTED episodes: destroys the record, its
+    /// archived versions, its index entries, and its git-mirror file.
+    /// Dry-run by default; CLI-only by design (no MCP/REST equivalent)
+    Purge {
+        /// Episode ids or unique prefixes (must already be demoted)
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Actually destroy. Without this, prints the manifest of what
+        /// would be destroyed and exits
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show the archived version history of an episode
     Versions { id: String },
     /// Import episodes from an engram git-export mirror directory
@@ -356,6 +368,92 @@ fn main() -> anyhow::Result<()> {
         Command::Restore { id } => {
             let ep = svc.restore(&id)?;
             println!("restored {}", ep.id);
+        }
+        Command::Purge { ids, yes } => {
+            let export_dir = std::env::var("ECPHORY_EXPORT_DIR")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from);
+            let mirror_path = |m: &PurgeManifest| {
+                export_dir.as_ref().map(|d| {
+                    d.join(&m.episode.group_id)
+                        .join(format!("{}.md", m.episode.id))
+                })
+            };
+
+            // Validate every target before destroying anything: one bad id
+            // (unknown, ambiguous, not demoted) fails the whole batch with
+            // nothing touched.
+            let mut manifests: Vec<PurgeManifest> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                let m = svc.purge_manifest(id)?;
+                // The same episode named twice (prefix + full id) is one purge.
+                if !manifests.iter().any(|seen| seen.episode.id == m.episode.id) {
+                    manifests.push(m);
+                }
+            }
+
+            for (i, m) in manifests.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                println!("episode {}", m.episode.id);
+                println!(
+                    "  name:       {}",
+                    m.episode.name.as_deref().unwrap_or("(unnamed)")
+                );
+                println!("  created_at: {}", m.episode.created_at.to_rfc3339());
+                println!("  versions:   {}", m.version_count);
+                println!("  indexed:    {}", if m.indexed { "yes" } else { "no" });
+                match mirror_path(m) {
+                    Some(p) if p.exists() => println!("  mirror:     {}", p.display()),
+                    Some(p) => println!("  mirror:     {} (not present)", p.display()),
+                    None => println!("  mirror:     (ECPHORY_EXPORT_DIR not set)"),
+                }
+            }
+
+            if !yes {
+                println!();
+                println!(
+                    "dry run: nothing destroyed; re-run with --yes to purge {} episode(s)",
+                    manifests.len()
+                );
+                return Ok(());
+            }
+
+            let mut mirror_removed = false;
+            for m in &manifests {
+                let (ep, versions_removed) = svc.purge(&m.episode.id.to_string())?;
+                println!(
+                    "purged {}: record, {versions_removed} archived version(s), and index entry destroyed",
+                    ep.id
+                );
+                if let Some(path) = mirror_path(m)
+                    && path.exists()
+                {
+                    std::fs::remove_file(&path).map_err(|e| {
+                        anyhow::anyhow!("removing mirror file {}: {e}", path.display())
+                    })?;
+                    println!("removed mirror file {}", path.display());
+                    mirror_removed = true;
+                }
+            }
+            // Commit the removals only when the mirror is already a git repo:
+            // the daemon's scheduled export auto-commits, so a committed
+            // mirror stays committed. Purge never git-inits a mirror that
+            // was a plain directory.
+            if let Some(dir) = &export_dir
+                && mirror_removed
+                && dir.join(".git").exists()
+            {
+                export::git_commit(dir, "ecphory purge")?;
+                println!("committed mirror removal in {}", dir.display());
+            }
+            println!(
+                "note: flight-recorder rows referencing purged ids remain (ids/ranks only, no \
+                 content), and the git mirror's HISTORY still contains the content; see the \
+                 README's \"Deletion story\" section"
+            );
         }
         Command::Versions { id } => {
             let versions = svc.versions(&id)?;

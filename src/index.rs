@@ -121,6 +121,27 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Remove one episode's document (operator purge). Caller commits.
+    pub fn remove(&mut self, id: &str) -> Result<()> {
+        self.writer.delete_term(Term::from_field_text(self.id, id));
+        Ok(())
+    }
+
+    /// Whether the committed index holds a document for this id — the
+    /// index-presence line in the purge manifest.
+    pub fn contains(&self, id: &str) -> Result<bool> {
+        let reader = self
+            .index
+            .reader()
+            .map_err(|e| Error::Storage(format!("index reader: {e}")))?;
+        let searcher = reader.searcher();
+        let query = TermQuery::new(Term::from_field_text(self.id, id), IndexRecordOption::Basic);
+        let count = searcher
+            .search(&query, &tantivy::collector::Count)
+            .map_err(|e| Error::Storage(format!("id lookup: {e}")))?;
+        Ok(count > 0)
+    }
+
     pub fn commit(&mut self) -> Result<()> {
         self.writer
             .commit()
