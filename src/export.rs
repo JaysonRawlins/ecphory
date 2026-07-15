@@ -165,7 +165,10 @@ mod tests {
     fn sample() -> Episode {
         let mut ep = Episode::new("body line one\n\nbody line two", "test");
         ep.name = Some("round trip".into());
-        ep.search_phrases = vec!["how do phrases survive export".into(), "mirror keeps enrichment".into()];
+        ep.search_phrases = vec![
+            "how do phrases survive export".into(),
+            "mirror keeps enrichment".into(),
+        ];
         ep.tags = vec!["a".into(), "b".into()];
         ep.metadata = serde_json::json!({"k": "v"});
         ep

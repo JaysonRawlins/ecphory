@@ -37,15 +37,23 @@ pub fn build_router(state: Shared) -> Router {
         .route("/memory/search-log", get(search_log))
         .route("/memory/access-log", get(access_log))
         .route("/memory/rating-log", get(rating_log))
+        .route("/memory/resolution-log", get(resolution_log))
         .route("/memory/search-rating", post(rate_search))
+        .route("/memory/heal-replay", post(heal_replay))
         .route("/memory/stats", get(stats))
         .route("/status", get(status))
         .route("/admin/import", post(admin_import))
         .route("/admin/export", post(admin_export))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_auth));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
 
     Router::new()
-        .route("/health", get(|| async { Json(json!({"status": "healthy"})) }))
+        .route(
+            "/health",
+            get(|| async { Json(json!({"status": "healthy"})) }),
+        )
         .nest("/api/v1", data_plane)
         .with_state(state)
 }
@@ -81,7 +89,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn err(code: StatusCode, message: impl Into<String>) -> Response {
-    (code, Json(json!({"success": false, "error": message.into()}))).into_response()
+    (
+        code,
+        Json(json!({"success": false, "error": message.into()})),
+    )
+        .into_response()
 }
 
 fn map_err(e: crate::error::Error) -> Response {
@@ -117,7 +129,11 @@ struct AddMemoryBody {
 }
 
 async fn add_memory(State(state): State<Shared>, Json(body): Json<AddMemoryBody>) -> Response {
-    let source = if body.source.is_empty() { "http".to_string() } else { body.source };
+    let source = if body.source.is_empty() {
+        "http".to_string()
+    } else {
+        body.source
+    };
     let mut ep = Episode::new(body.content, source);
     ep.name = none_if_empty(body.name);
     ep.search_phrases = body.search_phrases;
@@ -131,7 +147,11 @@ async fn add_memory(State(state): State<Shared>, Json(body): Json<AddMemoryBody>
 
     let mut svc = state.svc.lock().expect("service lock");
     match svc.insert(&ep) {
-        Ok(()) => (StatusCode::CREATED, Json(json!({"success": true, "episode": ep}))).into_response(),
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(json!({"success": true, "episode": ep})),
+        )
+            .into_response(),
         Err(e) => map_err(e),
     }
 }
@@ -154,19 +174,38 @@ struct SearchQuery {
     tags: Option<String>,
     #[serde(default)]
     include_deleted: bool,
-    /// Replay/benchmark bypass: skip the search log (eval replays and bulk
-    /// sweeps are not workload signal and must not pollute the tape).
+    /// Replay/benchmark bypass: skip the search log entirely. Prefer
+    /// `origin` for jobs that should stay visible on the tape.
     #[serde(default)]
     no_record: bool,
+    /// Tape provenance for synthetic traffic: organic (default) | eval |
+    /// backfill | heal-replay. Tagged entries are recorded but excluded
+    /// from top-queries and the workload aggregates.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Response {
+    let origin: crate::recorder::SearchOrigin =
+        match q.origin.as_deref().unwrap_or_default().parse() {
+            Ok(o) => o,
+            Err(e) => return err(StatusCode::BAD_REQUEST, e),
+        };
     let tags = q
         .tags
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let opts = SearchOptions {
-        limit: if q.max_results == 0 { 10 } else { q.max_results },
+        limit: if q.max_results == 0 {
+            10
+        } else {
+            q.max_results
+        },
         include_deleted: q.include_deleted,
         group_id: q.group_id.filter(|s| !s.is_empty()),
         source: q.source.filter(|s| !s.is_empty()),
@@ -176,7 +215,7 @@ async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Re
     let result = if q.no_record {
         svc.search_unrecorded(&q.query, &opts)
     } else {
-        svc.search(&q.query, &opts)
+        svc.search_tagged(&q.query, &opts, origin)
     };
     match result {
         Ok(out) => {
@@ -208,7 +247,11 @@ struct ListQuery {
 async fn list_episodes(State(state): State<Shared>, Query(q): Query<ListQuery>) -> Response {
     let svc = state.svc.lock().expect("service lock");
     match svc.list(ListOptions {
-        limit: if q.max_results == 0 { 10 } else { q.max_results },
+        limit: if q.max_results == 0 {
+            10
+        } else {
+            q.max_results
+        },
         include_deleted: q.include_deleted,
         ..Default::default()
     }) {
@@ -231,7 +274,11 @@ async fn get_episode(
     Query(q): Query<GetQuery>,
 ) -> Response {
     let svc = state.svc.lock().expect("service lock");
-    let result = if q.no_record { svc.get_unrecorded(&id) } else { svc.get(&id) };
+    let result = if q.no_record {
+        svc.get_unrecorded(&id)
+    } else {
+        svc.get(&id)
+    };
     match result {
         Ok(ep) => Json(ep).into_response(),
         Err(e) => map_err(e),
@@ -263,10 +310,22 @@ async fn update_episode(
         UpdateParams {
             content: none_if_empty(body.content),
             name: none_if_empty(body.name),
-            search_phrases: if body.search_phrases.is_empty() { None } else { Some(body.search_phrases) },
-            tags: if body.tags.is_empty() { None } else { Some(body.tags) },
+            search_phrases: if body.search_phrases.is_empty() {
+                None
+            } else {
+                Some(body.search_phrases)
+            },
+            tags: if body.tags.is_empty() {
+                None
+            } else {
+                Some(body.tags)
+            },
             expired_at: None,
-            metadata: if body.metadata.is_null() { None } else { Some(body.metadata) },
+            metadata: if body.metadata.is_null() {
+                None
+            } else {
+                Some(body.metadata)
+            },
         },
     ) {
         Ok(ep) => Json(ep).into_response(),
@@ -333,6 +392,34 @@ async fn rating_log(State(state): State<Shared>, Query(q): Query<LimitQuery>) ->
     }
 }
 
+async fn resolution_log(State(state): State<Shared>, Query(q): Query<LimitQuery>) -> Response {
+    let svc = state.svc.lock().expect("service lock");
+    match svc.recent_resolutions(q.limit.clamp(0, 1000)) {
+        Ok(entries) => {
+            Json(json!({"count": entries.len(), "resolutions": entries})).into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct HealReplayBody {
+    /// Top-k window for held/regressed; 0 means the correction default (5).
+    #[serde(default)]
+    k: usize,
+}
+
+/// The heal-replay regression pass runs daemon-side: it both searches and
+/// writes replay outcomes back onto the resolutions, and the daemon owns
+/// the store lock — the eval CLI just asks for the report.
+async fn heal_replay(State(state): State<Shared>, Json(body): Json<HealReplayBody>) -> Response {
+    let svc = state.svc.lock().expect("service lock");
+    match svc.replay_heals(body.k) {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
 #[derive(Deserialize)]
 struct RateSearchBody {
     search_id: String,
@@ -361,9 +448,11 @@ async fn rate_search(State(state): State<Shared>, Json(body): Json<RateSearchBod
         body.intended_episode_ids,
         none_if_empty(body.note),
     ) {
-        Ok(entry) => {
-            (StatusCode::CREATED, Json(json!({"success": true, "rating": entry}))).into_response()
-        }
+        Ok(entry) => (
+            StatusCode::CREATED,
+            Json(json!({"success": true, "rating": entry})),
+        )
+            .into_response(),
         Err(e) => map_err(e),
     }
 }
@@ -418,7 +507,12 @@ async fn admin_export(State(state): State<Shared>, Json(body): Json<ExportBody>)
     let dir = if body.dir.is_empty() {
         match std::env::var("ECPHORY_EXPORT_DIR") {
             Ok(d) if !d.is_empty() => d,
-            _ => return err(StatusCode::BAD_REQUEST, "no dir given and ECPHORY_EXPORT_DIR unset"),
+            _ => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "no dir given and ECPHORY_EXPORT_DIR unset",
+                );
+            }
         }
     } else {
         body.dir
@@ -476,5 +570,215 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secre"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    // ---- heal lifecycle, end to end over the real daemon path -----------------
+    //
+    // Everything below runs against a REAL axum server on an ephemeral
+    // loopback port with a temp store — the same router, extractors, and
+    // service locking production uses. Never the live store.
+
+    async fn spawn_server() -> (String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = Ecphory::open_with(dir.path().join("e2e.redb"), true).expect("open");
+        let state = Arc::new(AppState {
+            svc: Arc::new(Mutex::new(svc)),
+            token: None,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        (format!("http://{addr}"), dir)
+    }
+
+    fn get(base: &str, path: &str) -> serde_json::Value {
+        ureq::get(format!("{base}{path}"))
+            .call()
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"))
+            .body_mut()
+            .read_json()
+            .unwrap()
+    }
+
+    fn post(base: &str, path: &str, body: serde_json::Value) -> serde_json::Value {
+        ureq::post(format!("{base}{path}"))
+            .send_json(body)
+            .unwrap_or_else(|e| panic!("POST {path}: {e}"))
+            .body_mut()
+            .read_json()
+            .unwrap()
+    }
+
+    fn add(base: &str, content: &str) -> String {
+        let resp = post(base, "/api/v1/memory", json!({"content": content}));
+        resp["episode"]["id"].as_str().unwrap().to_string()
+    }
+
+    fn search(base: &str, query: &str) -> serde_json::Value {
+        get(
+            base,
+            &format!("/api/v1/memory/search?query={}", query.replace(' ', "%20")),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn heal_lifecycle_end_to_end() {
+        let (base, _dir) = spawn_server().await;
+
+        // The displacement rig: five episodes match the contested query with
+        // growing padding, so `crowded` sits at rank 5; the miss target
+        // shares no vocabulary with the query.
+        for pad in [
+            "",
+            "with extra notes about unrelated calibration steps",
+            "with extra notes about unrelated calibration steps and a long tail of \
+             miscellaneous observations",
+            "xenolith with extra notes about unrelated calibration steps and a long tail \
+             of miscellaneous observations gathered over several sessions",
+        ] {
+            add(&base, &format!("quartz crystal resonance {pad}"));
+        }
+        let crowded = add(
+            &base,
+            "quartz crystal resonance padparadscha with the longest padding of them all, \
+             extra notes about unrelated calibration steps and a long tail of miscellaneous \
+             observations gathered over several sessions plus appendices nobody reads",
+        );
+        let target = add(
+            &base,
+            "piezoelectric oscillator drift measured on the bench meter",
+        );
+
+        // Prior rating marks `crowded` as used — protecting it.
+        let out = search(&base, "padparadscha");
+        assert_eq!(out["results"][0]["episode"]["id"], json!(crowded));
+        post(
+            &base,
+            "/api/v1/memory/search-rating",
+            json!({
+                "search_id": out["search_id"],
+                "rating": "hit",
+                "used_episode_ids": [crowded],
+            }),
+        );
+
+        // The miss: real query, zero overlap with the target's vocabulary.
+        let out = search(&base, "quartz crystal resonance");
+        assert!(
+            !out["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["episode"]["id"] == json!(target)),
+            "target must genuinely miss before the heal"
+        );
+
+        // Rate it miss with the intended id: the heal fires, validates, and
+        // flags the collateral (crowded displaced from top k).
+        let rated = post(
+            &base,
+            "/api/v1/memory/search-rating",
+            json!({
+                "search_id": out["search_id"],
+                "rating": "miss",
+                "intended_episode_ids": [target],
+            }),
+        );
+        let correction = &rated["rating"]["corrections"][0];
+        assert_eq!(correction["action"], json!("enriched"));
+        assert_eq!(correction["after_rank"], json!(1));
+        assert_eq!(correction["displaced_used"], json!([crowded]));
+
+        // The resolution exists as its own record; the rating is immutable.
+        let resolutions = get(&base, "/api/v1/memory/resolution-log?limit=10");
+        assert_eq!(resolutions["count"], json!(1));
+        let resolution = &resolutions["resolutions"][0];
+        assert_eq!(resolution["rating_id"], rated["rating"]["id"]);
+        assert_eq!(resolution["query"], json!("quartz crystal resonance"));
+        assert_eq!(resolution["episode_id"], json!(target));
+        assert_eq!(resolution["validated_rank"], json!(1));
+        assert_eq!(resolution["displaced_used"], json!([crowded]));
+
+        // Replay pass over the real endpoint: the heal holds.
+        let report = post(&base, "/api/v1/memory/heal-replay", json!({"k": 0}));
+        assert_eq!(report["total"], json!(1));
+        assert_eq!(report["held"], json!(1));
+        assert_eq!(report["regressed"], json!(0));
+        assert_eq!(report["entries"][0]["rank"], json!(1));
+
+        // The eval CLI path drives the same endpoint and agrees.
+        let client = crate::eval::EvalClient::new(base.clone(), None);
+        assert!(crate::eval::run_heals(&client, 5).unwrap());
+
+        // Status splits the miss: rated, healed, nothing outstanding — and
+        // the replay searches are tagged synthetic, not workload.
+        let stats = get(&base, "/api/v1/memory/stats");
+        assert_eq!(stats["rated_miss"], json!(1));
+        assert_eq!(stats["rated_miss_healed"], json!(1));
+        assert_eq!(stats["rated_miss_outstanding"], json!(0));
+        assert_eq!(stats["heals"], json!(1));
+        assert_eq!(stats["heals_regressed"], json!(0));
+        assert!(
+            stats["synthetic"].as_u64().unwrap() >= 2,
+            "replay searches are tagged"
+        );
+        let replayed_in_top = stats["top_queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q[0] == json!("quartz crystal resonance"))
+            .map(|q| q[1].as_u64().unwrap());
+        assert_eq!(
+            replayed_in_top,
+            Some(1),
+            "replays must not inflate top_queries past the one organic search"
+        );
+
+        // Regression case: the healed target vanishes from search; the next
+        // replay pass flags it, in the report and in status.
+        ureq::delete(format!("{base}/api/v1/memory/episodes/{target}"))
+            .call()
+            .expect("demote target");
+        let report = post(&base, "/api/v1/memory/heal-replay", json!({"k": 0}));
+        assert_eq!(report["held"], json!(0));
+        assert_eq!(report["regressed"], json!(1));
+        assert!(
+            !crate::eval::run_heals(&client, 5).unwrap(),
+            "regressed pass must fail"
+        );
+        let stats = get(&base, "/api/v1/memory/stats");
+        assert_eq!(stats["heals_regressed"], json!(1));
+        // The original miss stays healed ground truth — replays never
+        // rewrite the rating layer.
+        assert_eq!(stats["rated_miss_healed"], json!(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn search_origin_param_tags_the_tape_and_rejects_garbage() {
+        let (base, _dir) = spawn_server().await;
+        add(&base, "origin fodder about kingfishers");
+
+        search(&base, "kingfishers"); // organic
+        get(&base, "/api/v1/memory/search?query=kingfishers&origin=eval");
+        get(
+            &base,
+            "/api/v1/memory/search?query=kingfishers&no_record=true",
+        );
+
+        let log = get(&base, "/api/v1/memory/search-log?limit=10");
+        assert_eq!(log["count"], json!(2), "no_record still bypasses the tape");
+        assert_eq!(log["searches"][0]["origin"], json!("eval"));
+        assert!(
+            log["searches"][1].get("origin").is_none(),
+            "organic stays implicit"
+        );
+
+        let err = ureq::get(format!("{base}/api/v1/memory/search?query=x&origin=bogus")).call();
+        match err {
+            Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 400),
+            other => panic!("expected 400 for bogus origin, got {other:?}"),
+        }
     }
 }

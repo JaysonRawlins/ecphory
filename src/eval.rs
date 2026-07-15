@@ -40,7 +40,9 @@ pub fn classify(query: &str) -> Bucket {
             || w.contains('/')
             || w.contains('_')
             || w.contains("::")
-            || (w.len() >= 3 && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+            || (w.len() >= 3
+                && w.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
             || (w.contains('-') && digits >= 1)
     });
 
@@ -48,11 +50,35 @@ pub fn classify(query: &str) -> Bucket {
     let first = lower.split_whitespace().next().unwrap_or("");
     let question_start = matches!(
         first,
-        "how" | "why" | "what" | "when" | "where" | "can" | "cannot" | "does" | "is" | "should" | "who"
+        "how"
+            | "why"
+            | "what"
+            | "when"
+            | "where"
+            | "can"
+            | "cannot"
+            | "does"
+            | "is"
+            | "should"
+            | "who"
     );
     let symptom_words = [
-        "cannot", "can't", "fails", "failed", "failing", "hangs", "hang", "slow", "broken",
-        "not working", "unfindable", "missing", "times out", "timeout", "error", "crash",
+        "cannot",
+        "can't",
+        "fails",
+        "failed",
+        "failing",
+        "hangs",
+        "hang",
+        "slow",
+        "broken",
+        "not working",
+        "unfindable",
+        "missing",
+        "times out",
+        "timeout",
+        "error",
+        "crash",
     ];
     let has_conceptual = question_start || symptom_words.iter().any(|w| lower.contains(w));
 
@@ -124,6 +150,15 @@ pub struct LoggedSearch {
     pub query: String,
     pub result_count: usize,
     pub results: Vec<LoggedHit>,
+    /// Tape provenance; absent on pre-0.4 rows (all organic).
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+impl LoggedSearch {
+    fn is_organic(&self) -> bool {
+        self.origin.as_deref().is_none_or(|o| o == "organic")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,7 +183,10 @@ pub struct LoggedRating {
 
 impl EvalClient {
     pub fn new(base: String, token: Option<String>) -> Self {
-        Self { base: base.trim_end_matches('/').to_string(), token }
+        Self {
+            base: base.trim_end_matches('/').to_string(),
+            token,
+        }
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path_and_query: &str) -> Result<T> {
@@ -165,14 +203,38 @@ impl EvalClient {
             .map_err(|e| Error::Storage(format!("decoding {url}: {e}")))
     }
 
+    fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base, path);
+        let mut req = ureq::post(&url);
+        if let Some(token) = &self.token {
+            req = req.header("Authorization", &format!("Bearer {token}"));
+        }
+        let mut resp = req
+            .send_json(body)
+            .map_err(|e| Error::Storage(format!("POST {url}: {e}")))?;
+        resp.body_mut()
+            .read_json()
+            .map_err(|e| Error::Storage(format!("decoding {url}: {e}")))
+    }
+
     pub fn search(&self, query: &str, k: usize) -> Result<(f64, Vec<String>)> {
         let encoded: String = url_encode(query);
-        // no_record: eval replays are not workload signal — recording them
-        // would pollute the very tape this eval scores (observer effect).
+        // origin=eval: replays are not workload signal. They used to bypass
+        // the tape outright (no_record); tagging keeps them visible and
+        // filterable while top-queries and the aggregates ignore them —
+        // and the from-log analysis reads the tape before replaying, so
+        // same-run recording can't feed back into what it scores.
         let resp: SearchResponse = self.get_json(&format!(
-            "/api/v1/memory/search?query={encoded}&max_results={k}&no_record=true"
+            "/api/v1/memory/search?query={encoded}&max_results={k}&origin=eval"
         ))?;
-        Ok((resp.latency_ms, resp.results.into_iter().map(|r| r.episode.id).collect()))
+        Ok((
+            resp.latency_ms,
+            resp.results.into_iter().map(|r| r.episode.id).collect(),
+        ))
     }
 
     pub fn search_log(&self, limit: usize) -> Result<Vec<LoggedSearch>> {
@@ -201,6 +263,33 @@ impl EvalClient {
         let w: Wrap = self.get_json(&format!("/api/v1/memory/rating-log?limit={limit}"))?;
         Ok(w.ratings)
     }
+
+    /// Run the heal-replay pass daemon-side (it writes replay outcomes back
+    /// onto the resolutions) and fetch the report.
+    pub fn heal_replay(&self, k: usize) -> Result<HealReport> {
+        self.post_json("/api/v1/memory/heal-replay", serde_json::json!({ "k": k }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HealReport {
+    pub total: usize,
+    pub held: usize,
+    pub regressed: usize,
+    pub k: usize,
+    pub entries: Vec<HealEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HealEntry {
+    pub query: String,
+    pub episode_id: String,
+    pub validated_rank: usize,
+    #[serde(default)]
+    pub rank: Option<usize>,
+    pub held: bool,
+    #[serde(default)]
+    pub displaced_used: Vec<String>,
 }
 
 fn url_encode(s: &str) -> String {
@@ -239,7 +328,11 @@ impl BucketMetrics {
     }
 
     pub fn mrr(&self) -> f64 {
-        if self.n == 0 { 0.0 } else { self.mrr_sum / self.n as f64 }
+        if self.n == 0 {
+            0.0
+        } else {
+            self.mrr_sum / self.n as f64
+        }
     }
 
     pub fn line(&self, label: &str) -> String {
@@ -258,12 +351,19 @@ impl BucketMetrics {
 
 /// Rank (1-based) of the gold id (full or prefix) in the returned ids.
 pub fn rank_of(gold_id: &str, ids: &[String]) -> Option<usize> {
-    ids.iter().position(|id| id.starts_with(gold_id)).map(|i| i + 1)
+    ids.iter()
+        .position(|id| id.starts_with(gold_id))
+        .map(|i| i + 1)
 }
 
 // ---- gold mode ---------------------------------------------------------------
 
-pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Option<f64>) -> Result<bool> {
+pub fn run_gold(
+    client: &EvalClient,
+    pairs: &[GoldPair],
+    k: usize,
+    min_mrr: Option<f64>,
+) -> Result<bool> {
     let mut overall = BucketMetrics::default();
     let mut by_bucket: std::collections::HashMap<Bucket, BucketMetrics> = Default::default();
     let mut latencies: Vec<f64> = Vec::new();
@@ -284,7 +384,10 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = latencies.get(latencies.len() / 2).copied().unwrap_or(0.0);
 
-    println!("gold eval: {} pairs, k={k}, server p50 {p50:.2}ms", pairs.len());
+    println!(
+        "gold eval: {} pairs, k={k}, server p50 {p50:.2}ms",
+        pairs.len()
+    );
     println!("  {}", overall.line("overall"));
     for bucket in [Bucket::Identifier, Bucket::Conceptual, Bucket::Mixed] {
         if let Some(m) = by_bucket.get(&bucket) {
@@ -308,6 +411,50 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
     Ok(true)
 }
 
+// ---- heal-replay mode ---------------------------------------------------------
+
+/// Replay every healed miss as a regression test: does the intended episode
+/// still rank within top k for the original failed query? Returns false when
+/// any heal regressed (drift-guard semantics, like --min-mrr). Collateral
+/// displacement is reported but never fails the pass.
+pub fn run_heals(client: &EvalClient, k: usize) -> Result<bool> {
+    let report = client.heal_replay(k)?;
+    if report.total == 0 {
+        println!("heal replay: no heals recorded yet — misses that self-correct will show up here");
+        return Ok(true);
+    }
+
+    println!("heal replay: {} heals, k={}", report.total, report.k);
+    for e in &report.entries {
+        println!(
+            "  {:<9} {:?} -> {} | validated {} | now {}",
+            if e.held { "held" } else { "REGRESSED" },
+            truncate(&e.query, 48),
+            &e.episode_id[..8.min(e.episode_id.len())],
+            e.validated_rank,
+            e.rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "MISS".into()),
+        );
+        if !e.displaced_used.is_empty() {
+            let displaced: Vec<&str> = e
+                .displaced_used
+                .iter()
+                .map(|id| &id[..8.min(id.len())])
+                .collect();
+            println!(
+                "            collateral: displaced used episodes [{}]",
+                displaced.join(", ")
+            );
+        }
+    }
+    println!("  {} held, {} regressed", report.held, report.regressed);
+    if report.regressed > 0 {
+        println!("FAIL: {} heal(s) regressed", report.regressed);
+    }
+    Ok(report.regressed == 0)
+}
+
 // ---- from-log mode -----------------------------------------------------------
 
 /// Entries per UTC second at or above which a cluster is treated as
@@ -316,7 +463,10 @@ pub fn run_gold(client: &EvalClient, pairs: &[GoldPair], k: usize, min_mrr: Opti
 const BURST_THRESHOLD: usize = 5;
 
 /// Drop entries that fall in bursty seconds. Returns (kept, dropped_count).
-fn drop_bursts<T>(entries: Vec<T>, ts_of: impl Fn(&T) -> chrono::DateTime<chrono::Utc>) -> (Vec<T>, usize) {
+fn drop_bursts<T>(
+    entries: Vec<T>,
+    ts_of: impl Fn(&T) -> chrono::DateTime<chrono::Utc>,
+) -> (Vec<T>, usize) {
     let mut per_sec: std::collections::HashMap<i64, usize> = Default::default();
     for e in &entries {
         *per_sec.entry(ts_of(e).timestamp()).or_default() += 1;
@@ -342,13 +492,14 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
     if !ratings.is_empty() {
         let by_id: std::collections::HashMap<&str, &LoggedSearch> =
             raw_searches.iter().map(|s| (s.id.as_str(), s)).collect();
-        let (hits, partials, misses) = ratings.iter().fold((0, 0, 0), |(h, p, m), r| {
-            match r.rating.as_str() {
-                "hit" => (h + 1, p, m),
-                "partial" => (h, p + 1, m),
-                _ => (h, p, m + 1),
-            }
-        });
+        let (hits, partials, misses) =
+            ratings
+                .iter()
+                .fold((0, 0, 0), |(h, p, m), r| match r.rating.as_str() {
+                    "hit" => (h + 1, p, m),
+                    "partial" => (h, p + 1, m),
+                    _ => (h, p, m + 1),
+                });
         ratings_summary.push(format!(
             "explicit ratings ({}): {hits} hit, {partials} partial, {misses} miss",
             ratings.len()
@@ -357,7 +508,9 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
         let mut rated_taped = BucketMetrics::default();
         let mut rated_fresh = BucketMetrics::default();
         for r in &ratings {
-            let Some(search) = by_id.get(r.search_id.as_str()) else { continue };
+            let Some(search) = by_id.get(r.search_id.as_str()) else {
+                continue;
+            };
             for used in &r.used_episode_ids {
                 let taped_rank = search
                     .results
@@ -375,9 +528,21 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
         }
     }
 
-    // Synthetic-traffic guard: burst clusters (same-second floods from
-    // benchmarks, replays, bulk jobs) are not usage signal.
-    let (searches, dropped_s) = drop_bursts(raw_searches, |s: &LoggedSearch| s.ts);
+    // Synthetic-traffic guards. Tagged entries (eval/backfill/heal-replay)
+    // declare themselves; the burst heuristic stays for pre-tag rows and
+    // anything that forgot to tag.
+    let before = raw_searches.len();
+    let organic: Vec<LoggedSearch> = raw_searches
+        .into_iter()
+        .filter(|s| s.is_organic())
+        .collect();
+    let dropped_tagged = before - organic.len();
+    if dropped_tagged > 0 {
+        println!(
+            "origin filter: dropped {dropped_tagged} tagged searches (eval/backfill/heal-replay)"
+        );
+    }
+    let (searches, dropped_s) = drop_bursts(organic, |s: &LoggedSearch| s.ts);
     let (accesses, dropped_a) = drop_bursts(raw_accesses, |a: &LoggedAccess| a.ts);
     if dropped_s + dropped_a > 0 {
         println!(
@@ -416,9 +581,7 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
     for access in &accesses {
         let candidate = searches
             .iter()
-            .filter(|s| {
-                s.ts <= access.ts && (access.ts - s.ts).num_seconds() <= window_secs
-            })
+            .filter(|s| s.ts <= access.ts && (access.ts - s.ts).num_seconds() <= window_secs)
             .max_by_key(|s| s.ts);
         if let Some(search) = candidate
             && seen.insert((search.query.clone(), access.episode_id.clone()))
@@ -451,8 +614,12 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
             "  {:?} -> {} | taped rank {} | now {}",
             truncate(&search.query, 48),
             &access.episode_id[..8],
-            logged_rank.map(|r| r.to_string()).unwrap_or_else(|| "MISS".into()),
-            fresh_rank.map(|r| r.to_string()).unwrap_or_else(|| "MISS".into()),
+            logged_rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "MISS".into()),
+            fresh_rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "MISS".into()),
         );
     }
     println!("  {}", logged.line("as-taped"));
@@ -475,13 +642,19 @@ mod tests {
     #[test]
     fn classify_buckets() {
         assert_eq!(classify("gavel reviewed signal PR 198"), Bucket::Identifier);
-        assert_eq!(classify("aws account 842478712031 survivor"), Bucket::Identifier);
+        assert_eq!(
+            classify("aws account 842478712031 survivor"),
+            Bucket::Identifier
+        );
         assert_eq!(classify("DUCKDB_PATH split brain"), Bucket::Identifier);
         assert_eq!(
             classify("saved a memory but later sessions cannot find it anywhere"),
             Bucket::Conceptual
         );
-        assert_eq!(classify("how do I restore a demoted episode"), Bucket::Conceptual);
+        assert_eq!(
+            classify("how do I restore a demoted episode"),
+            Bucket::Conceptual
+        );
         assert_eq!(
             classify("nightly job hangs with error ECPHORY_DB unset"),
             Bucket::Mixed
@@ -531,7 +704,11 @@ mod tests {
     fn gold_parsing_with_comments() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gold.jsonl");
-        std::fs::write(&path, "# comment\n\n{\"query\":\"q1\",\"id\":\"abc\"}\n{\"query\":\"q2\",\"id\":\"def\"}\n").unwrap();
+        std::fs::write(
+            &path,
+            "# comment\n\n{\"query\":\"q1\",\"id\":\"abc\"}\n{\"query\":\"q2\",\"id\":\"def\"}\n",
+        )
+        .unwrap();
         let pairs = parse_gold(&path).unwrap();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[1].id, "def");

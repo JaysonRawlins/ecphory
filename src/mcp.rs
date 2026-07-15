@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -85,6 +85,12 @@ pub struct SearchRequest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub include_deleted: bool,
+    /// Tape provenance for synthetic traffic: "eval", "backfill", or
+    /// "heal-replay". Leave empty for normal use (organic). Tagged searches
+    /// are recorded but excluded from top-queries and workload aggregates —
+    /// use this for bulk sweeps so they don't pollute the usage signal.
+    #[serde(default)]
+    pub origin: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -177,7 +183,10 @@ fn opt_vec(v: Vec<String>) -> Option<Vec<String>> {
 #[tool_router]
 impl McpServer {
     pub fn new(svc: Arc<Mutex<Ecphory>>) -> Self {
-        Self { svc, tool_router: Self::tool_router() }
+        Self {
+            svc,
+            tool_router: Self::tool_router(),
+        }
     }
 
     #[tool(
@@ -187,7 +196,11 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<AddMemoryRequest>,
     ) -> Result<String, ErrorData> {
-        let source = if req.source.is_empty() { "mcp".to_string() } else { req.source };
+        let source = if req.source.is_empty() {
+            "mcp".to_string()
+        } else {
+            req.source
+        };
         let mut ep = Episode::new(req.content, source);
         ep.name = opt_str(req.name);
         ep.search_phrases = req.search_phrases;
@@ -208,25 +221,32 @@ impl McpServer {
         description = "Search memories (BM25 over content, names, and search phrases). Returns ranked episodes with scores, plus a search_id — after you've read the results and know whether they answered the question, pass that search_id to rate_search."
     )]
     fn search(&self, Parameters(req): Parameters<SearchRequest>) -> Result<String, ErrorData> {
+        let origin: crate::recorder::SearchOrigin = req
+            .origin
+            .parse()
+            .map_err(|e: String| ErrorData::invalid_params(e, None))?;
         let svc = self.svc.lock().map_err(internal)?;
         let out = svc
-            .search(
+            .search_tagged(
                 &req.query,
                 &SearchOptions {
-                    limit: if req.max_results == 0 { 10 } else { req.max_results },
+                    limit: if req.max_results == 0 {
+                        10
+                    } else {
+                        req.max_results
+                    },
                     include_deleted: req.include_deleted,
                     group_id: opt_str(req.group_id),
                     source: opt_str(req.source),
                     tags: req.tags,
                 },
+                origin,
             )
             .map_err(internal)?;
         let results: Vec<_> = out
             .results
             .iter()
-            .map(|r| {
-                serde_json::json!({ "rank": r.rank, "score": r.score, "episode": r.episode })
-            })
+            .map(|r| serde_json::json!({ "rank": r.rank, "score": r.score, "episode": r.episode }))
             .collect();
         to_json(&serde_json::json!({
             "count": results.len(),
@@ -243,8 +263,10 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<RateSearchRequest>,
     ) -> Result<String, ErrorData> {
-        let rating: crate::recorder::Rating =
-            req.rating.parse().map_err(|e: String| ErrorData::invalid_params(e, None))?;
+        let rating: crate::recorder::Rating = req
+            .rating
+            .parse()
+            .map_err(|e: String| ErrorData::invalid_params(e, None))?;
         let mut svc = self.svc.lock().map_err(internal)?;
         let entry = svc
             .rate_search(
@@ -286,7 +308,11 @@ impl McpServer {
         let svc = self.svc.lock().map_err(internal)?;
         let eps = svc
             .list(ListOptions {
-                limit: if req.max_results == 0 { 10 } else { req.max_results },
+                limit: if req.max_results == 0 {
+                    10
+                } else {
+                    req.max_results
+                },
                 include_deleted: req.include_deleted,
                 ..Default::default()
             })
@@ -311,7 +337,11 @@ impl McpServer {
                     search_phrases: opt_vec(req.search_phrases),
                     tags: opt_vec(req.tags),
                     expired_at: None,
-                    metadata: if req.metadata.is_null() { None } else { Some(req.metadata) },
+                    metadata: if req.metadata.is_null() {
+                        None
+                    } else {
+                        Some(req.metadata)
+                    },
                 },
             )
             .map_err(not_found)?;
@@ -341,10 +371,7 @@ impl McpServer {
     }
 
     #[tool(description = "Restore a previously demoted episode.")]
-    fn restore_episode(
-        &self,
-        Parameters(req): Parameters<IdRequest>,
-    ) -> Result<String, ErrorData> {
+    fn restore_episode(&self, Parameters(req): Parameters<IdRequest>) -> Result<String, ErrorData> {
         let mut svc = self.svc.lock().map_err(internal)?;
         let ep = svc.restore(&req.id).map_err(not_found)?;
         to_json(&serde_json::json!({ "success": true, "id": ep.id }))
@@ -381,7 +408,7 @@ impl ServerHandler for McpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(identity)
             .with_instructions(
-            "ecphory is a lexical-first (BM25) memory store. When storing a memory, always \
+                "ecphory is a lexical-first (BM25) memory store. When storing a memory, always \
              include 2-3 search_phrases: plain-words paraphrases of how this memory will be \
              asked about later, in vocabulary DIFFERENT from the content (symptom framings, \
              questions a future session would ask). Retrieval quality depends on them. \
@@ -394,7 +421,7 @@ impl ServerHandler for McpServer {
              so that phrasing finds it next time. For bulk or \
              maintenance reads, pass no_record=true to get_episode so they don't pollute \
              the usage signal.",
-        )
+            )
     }
 }
 
@@ -436,15 +463,20 @@ pub fn serve_stdio(svc: Ecphory) -> anyhow::Result<()> {
 /// exclusive lock).
 pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let shared = Arc::new(Mutex::new(svc));
-    let token = std::env::var("ECPHORY_AUTH_TOKEN").ok().filter(|t| !t.is_empty());
+    let token = std::env::var("ECPHORY_AUTH_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
     if token.is_some() {
         tracing::info!("bearer auth enabled (ECPHORY_AUTH_TOKEN)");
     }
-    let state = Arc::new(crate::http::AppState { svc: shared.clone(), token });
+    let state = Arc::new(crate::http::AppState {
+        svc: shared.clone(),
+        token,
+    });
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
