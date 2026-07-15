@@ -23,6 +23,10 @@ const ACCESS_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("access_lo
 /// Explicit consumer verdicts on searches (rate_search) — the preferred
 /// quality signal; the access-log join is the fallback for unrated searches.
 const RATING_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("rating_log");
+/// Validated heals, keyed by resolution id. Deliberately NOT covered by the
+/// recorder retention prune: every healed miss is a permanent regression
+/// test (the entry carries its own query for exactly this reason).
+const RESOLUTION_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("resolution_log");
 
 pub struct Store {
     db: Database,
@@ -51,6 +55,7 @@ impl Store {
             tx.open_table(SEARCH_LOG)?;
             tx.open_table(ACCESS_LOG)?;
             tx.open_table(RATING_LOG)?;
+            tx.open_table(RESOLUTION_LOG)?;
         }
         tx.commit()?;
         Ok(Self { db })
@@ -270,6 +275,13 @@ impl Store {
         self.try_log(RATING_LOG, &entry.id.to_string(), entry)
     }
 
+    /// Resolutions are heal-lifecycle state, not diagnostics — failures
+    /// surface. Writing an existing id overwrites in place, which is how a
+    /// replay pass records its outcome on the resolution it re-verified.
+    pub fn log_resolution(&self, entry: &crate::recorder::ResolutionLogEntry) -> Result<()> {
+        self.try_log(RESOLUTION_LOG, &entry.id.to_string(), entry)
+    }
+
     /// Direct search-log lookup by entry id — validates rate_search targets.
     pub fn get_search_entry(&self, id: &str) -> Result<crate::recorder::SearchLogEntry> {
         let tx = self.db.begin_read()?;
@@ -311,6 +323,14 @@ impl Store {
         self.read_log(RATING_LOG, limit)
     }
 
+    /// Newest-first resolutions (validated heals).
+    pub fn recent_resolutions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::recorder::ResolutionLogEntry>> {
+        self.read_log(RESOLUTION_LOG, limit)
+    }
+
     fn read_log<T: serde::de::DeserializeOwned>(
         &self,
         table: TableDefinition<&str, &[u8]>,
@@ -330,6 +350,8 @@ impl Store {
     }
 
     /// Delete recorder entries older than the cutoff. Returns entries removed.
+    /// RESOLUTION_LOG is exempt on purpose: heals are permanent regression
+    /// tests, not diagnostics.
     pub fn prune_logs(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
         let mut removed = 0;
         for table in [SEARCH_LOG, ACCESS_LOG, RATING_LOG] {

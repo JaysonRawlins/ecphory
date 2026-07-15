@@ -6,7 +6,7 @@ use crate::index::{Hit, SearchIndex};
 use crate::model::{Episode, UpdateParams};
 use crate::recorder::{
     self, AccessLogEntry, Correction, CorrectionAction, LoggedHit, Rating, RatingLogEntry,
-    RecorderStats, SearchLogEntry,
+    RecorderStats, ReplayOutcome, ResolutionLogEntry, SearchLogEntry, SearchOrigin,
 };
 use crate::store::{ListOptions, Store};
 
@@ -51,6 +51,32 @@ pub struct SearchOutcome {
     /// Recorder entry id for this search, when it was recorded. The handle
     /// a consumer passes to rate_search to log its verdict.
     pub search_id: Option<uuid::Uuid>,
+}
+
+/// One heal re-verified by a replay pass.
+#[derive(Debug, serde::Serialize)]
+pub struct HealReplayEntry {
+    pub resolution_id: String,
+    pub rating_id: String,
+    pub query: String,
+    pub episode_id: String,
+    /// Rank at validation time — the baseline this replay is held against.
+    pub validated_rank: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    pub held: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub displaced_used: Vec<String>,
+}
+
+/// Heal-replay regression pass over every recorded resolution.
+#[derive(Debug, serde::Serialize)]
+pub struct HealReplayReport {
+    pub total: usize,
+    pub held: usize,
+    pub regressed: usize,
+    pub k: usize,
+    pub entries: Vec<HealReplayEntry>,
 }
 
 impl Ecphory {
@@ -196,21 +222,34 @@ impl Ecphory {
     /// from the index (4x) so filters don't starve the requested limit — at
     /// personal-corpus scale the overfetch cost is noise.
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<SearchOutcome> {
-        self.search_impl(query, opts, true)
+        self.search_impl(query, opts, Some(SearchOrigin::Organic))
     }
 
-    /// Search without touching the recorder — for eval replays, benchmarks,
-    /// and bulk jobs whose queries are not workload signal. The burst-
-    /// polluted tape of 2026-07-13 (978/1000 entries synthetic) taught this.
+    /// Search without touching the recorder — for internal probes and jobs
+    /// that shouldn't appear on the tape at all. The burst-polluted tape of
+    /// 2026-07-13 (978/1000 entries synthetic) taught this.
     pub fn search_unrecorded(&self, query: &str, opts: &SearchOptions) -> Result<SearchOutcome> {
-        self.search_impl(query, opts, false)
+        self.search_impl(query, opts, None)
+    }
+
+    /// Search recorded under an explicit origin tag — the generalized
+    /// recorder bypass. Synthetic jobs that want tape visibility (eval
+    /// replays, backfills, heal replays) tag themselves here; workload
+    /// aggregates and top-queries only count organic entries.
+    pub fn search_tagged(
+        &self,
+        query: &str,
+        opts: &SearchOptions,
+        origin: SearchOrigin,
+    ) -> Result<SearchOutcome> {
+        self.search_impl(query, opts, Some(origin))
     }
 
     fn search_impl(
         &self,
         query: &str,
         opts: &SearchOptions,
-        record: bool,
+        origin: Option<SearchOrigin>,
     ) -> Result<SearchOutcome> {
         let started = Instant::now();
         let limit = if opts.limit == 0 { 10 } else { opts.limit };
@@ -261,7 +300,10 @@ impl Ecphory {
 
         // Record the search. Empty queries are browses, not retrieval events;
         // logging them would drown the workload signal.
-        if record && self.recording && !query.trim().is_empty() {
+        if let Some(origin) = origin
+            && self.recording
+            && !query.trim().is_empty()
+        {
             let search_id = uuid::Uuid::now_v7();
             self.store.log_search(&SearchLogEntry {
                 id: search_id,
@@ -272,6 +314,7 @@ impl Ecphory {
                 group_id: opts.group_id.clone(),
                 source: opts.source.clone(),
                 tags: opts.tags.clone(),
+                origin,
                 result_count: outcome.results.len(),
                 results: outcome
                     .results
@@ -307,8 +350,12 @@ impl Ecphory {
         note: Option<String>,
     ) -> Result<RatingLogEntry> {
         let search = self.store.get_search_entry(search_id)?;
+        // The rating id exists before the corrections run so a validated
+        // heal can reference it in its resolution record.
+        let rating_id = uuid::Uuid::now_v7();
 
         let mut corrections = Vec::new();
+        let mut resolutions: Vec<ResolutionLogEntry> = Vec::new();
         if rating != Rating::Hit {
             let mut targets: Vec<String> = intended_episode_ids
                 .iter()
@@ -316,13 +363,42 @@ impl Ecphory {
                 .cloned()
                 .collect();
             targets.dedup();
+            let protected = self.protected_episode_ids()?;
             for target in &targets {
-                corrections.push(self.self_correct(&search.query, target));
+                let (correction, top_k) = self.self_correct(&search.query, target, &protected);
+                // A miss whose target verifiably ranks within k is resolved:
+                // Enriched is a validated heal; AlreadyRanks means the gap
+                // closed by other means (stale rating) — either way there is
+                // nothing outstanding, and the (query, target) pair becomes a
+                // permanent replay regression test. The rating itself is
+                // never touched: the miss stays ground truth for first-
+                // contact failure rate.
+                if rating == Rating::Miss
+                    && matches!(
+                        correction.action,
+                        CorrectionAction::Enriched | CorrectionAction::AlreadyRanks
+                    )
+                    && let Some(validated_rank) = correction.after_rank
+                {
+                    resolutions.push(ResolutionLogEntry {
+                        id: uuid::Uuid::now_v7(),
+                        ts: chrono::Utc::now(),
+                        rating_id: rating_id.to_string(),
+                        search_id: search.id.to_string(),
+                        query: search.query.clone(),
+                        episode_id: correction.episode_id.clone(),
+                        validated_rank,
+                        top_k: top_k.unwrap_or_default(),
+                        displaced_used: correction.displaced_used.clone(),
+                        last_replay: None,
+                    });
+                }
+                corrections.push(correction);
             }
         }
 
         let entry = RatingLogEntry {
-            id: uuid::Uuid::now_v7(),
+            id: rating_id,
             ts: chrono::Utc::now(),
             search_id: search.id.to_string(),
             rating,
@@ -332,6 +408,9 @@ impl Ecphory {
             note,
         };
         self.store.log_rating(&entry)?;
+        for resolution in &resolutions {
+            self.store.log_resolution(resolution)?;
+        }
         Ok(entry)
     }
 
@@ -339,23 +418,44 @@ impl Ecphory {
     /// applied when the target already ranks (stale rating) or when the
     /// query is already a phrase (that miss is crowding or a bug — more
     /// lexical mass won't fix it and phrase inflation crowds siblings).
-    fn self_correct(&mut self, query: &str, id_or_prefix: &str) -> Correction {
+    ///
+    /// Also returns the post-validation top-k ids (when the target ranks)
+    /// so the caller can snapshot them on the resolution record, and runs
+    /// the collateral-damage check: enrichment that displaces previously
+    /// used/hit episodes out of the top k gets flagged on the correction —
+    /// a warning, never a rollback.
+    fn self_correct(
+        &mut self,
+        query: &str,
+        id_or_prefix: &str,
+        protected: &[String],
+    ) -> (Correction, Option<Vec<String>>) {
         let mk = |id: &str, action, before, after| Correction {
             episode_id: id.to_string(),
             action,
             before_rank: before,
             after_rank: after,
+            displaced_used: Vec::new(),
         };
 
         let ep = match self.store.get(id_or_prefix) {
             Ok(ep) => ep,
-            Err(_) => return mk(id_or_prefix, CorrectionAction::TargetNotFound, None, None),
+            Err(_) => {
+                return (
+                    mk(id_or_prefix, CorrectionAction::TargetNotFound, None, None),
+                    None,
+                );
+            }
         };
         let id = ep.id.to_string();
 
-        let before = self.rank_of_unrecorded(query, &id);
-        if before.is_some_and(|r| r <= CORRECTION_K) {
-            return mk(&id, CorrectionAction::AlreadyRanks, before, before);
+        let before_ids = self.top_k_unrecorded(query);
+        let before = rank_in(&before_ids, &id);
+        if before.is_some() {
+            return (
+                mk(&id, CorrectionAction::AlreadyRanks, before, before),
+                Some(before_ids),
+            );
         }
 
         let normalized = query.trim().to_lowercase();
@@ -364,10 +464,16 @@ impl Ecphory {
             .iter()
             .any(|p| p.trim().to_lowercase() == normalized)
         {
-            return mk(&id, CorrectionAction::DuplicatePhrase, before, None);
+            return (
+                mk(&id, CorrectionAction::DuplicatePhrase, before, None),
+                None,
+            );
         }
         if ep.search_phrases.len() >= MAX_SEARCH_PHRASES {
-            return mk(&id, CorrectionAction::PhraseCapReached, before, None);
+            return (
+                mk(&id, CorrectionAction::PhraseCapReached, before, None),
+                None,
+            );
         }
 
         let mut phrases = ep.search_phrases.clone();
@@ -382,30 +488,139 @@ impl Ecphory {
             )
             .is_err()
         {
-            return mk(&id, CorrectionAction::TargetNotFound, before, None);
+            return (
+                mk(&id, CorrectionAction::TargetNotFound, before, None),
+                None,
+            );
         }
 
-        let after = self.rank_of_unrecorded(query, &id);
-        let action = if after.is_some_and(|r| r <= CORRECTION_K) {
+        let after_ids = self.top_k_unrecorded(query);
+        let after = rank_in(&after_ids, &id);
+        let action = if after.is_some() {
             CorrectionAction::Enriched
         } else {
             CorrectionAction::EnrichedStillLow
         };
-        mk(&id, action, before, after)
+        let mut correction = mk(&id, action, before, after);
+        correction.displaced_used = displaced_protected(&before_ids, &after_ids, &id, protected);
+        if !correction.displaced_used.is_empty() {
+            tracing::warn!(
+                "heal collateral: enriching {} for {query:?} displaced previously used \
+                 episodes out of top {CORRECTION_K}: {:?}",
+                &id[..8],
+                correction.displaced_used
+            );
+        }
+        (correction, after.is_some().then_some(after_ids))
     }
 
-    /// Rank (1-based) of `id` for `query` within CORRECTION_K, unrecorded so
-    /// correction probes never pollute the workload tape.
-    fn rank_of_unrecorded(&self, query: &str, id: &str) -> Option<usize> {
+    /// Top-CORRECTION_K episode ids for `query`, unrecorded so correction
+    /// probes never pollute the workload tape.
+    fn top_k_unrecorded(&self, query: &str) -> Vec<String> {
         let opts = SearchOptions {
             limit: CORRECTION_K,
             ..Default::default()
         };
-        let out = self.search_unrecorded(query, &opts).ok()?;
-        out.results
-            .iter()
-            .find(|r| r.episode.id.to_string() == id)
-            .map(|r| r.rank)
+        match self.search_unrecorded(query, &opts) {
+            Ok(out) => out
+                .results
+                .iter()
+                .map(|r| r.episode.id.to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Episodes with proven consumer value: everything prior ratings marked
+    /// as used, plus targets of validated heals. Displacing one of these out
+    /// of a top k is the collateral the heal lifecycle warns about. Entries
+    /// may be prefixes (used_episode_ids accepts them), so matching is
+    /// starts_with, same as everywhere else ids travel.
+    fn protected_episode_ids(&self) -> Result<Vec<String>> {
+        let mut protected: Vec<String> = Vec::new();
+        for rating in self.store.recent_ratings(0)? {
+            protected.extend(rating.used_episode_ids);
+        }
+        for resolution in self.store.recent_resolutions(0)? {
+            protected.push(resolution.episode_id);
+        }
+        protected.sort();
+        protected.dedup();
+        Ok(protected)
+    }
+
+    /// Re-run every heal's original query against the live index and verify
+    /// the intended episode still ranks within top k — the healed-miss
+    /// regression pass. Each resolution's last_replay is updated in place
+    /// (the resolution facts themselves stay write-once), so a regressed
+    /// heal shows up in stats without re-searching at status time. Replay
+    /// searches are taped under the heal-replay origin: visible, never
+    /// counted as workload.
+    pub fn replay_heals(&self, k: usize) -> Result<HealReplayReport> {
+        let k = if k == 0 { CORRECTION_K } else { k };
+        let resolutions = self.store.recent_resolutions(0)?;
+        let protected = self.protected_episode_ids()?;
+
+        let mut entries = Vec::with_capacity(resolutions.len());
+        for mut resolution in resolutions {
+            let opts = SearchOptions {
+                limit: k,
+                ..Default::default()
+            };
+            let out = self.search_tagged(&resolution.query, &opts, SearchOrigin::HealReplay)?;
+            let ids: Vec<String> = out
+                .results
+                .iter()
+                .map(|r| r.episode.id.to_string())
+                .collect();
+            let rank = rank_in(&ids, &resolution.episode_id);
+            let held = rank.is_some();
+            // Collateral on replay: current top k vs the as-healed snapshot.
+            let displaced_used =
+                displaced_protected(&resolution.top_k, &ids, &resolution.episode_id, &protected);
+            if !held {
+                tracing::warn!(
+                    "heal regressed: {:?} no longer ranks {} in top {k}",
+                    resolution.query,
+                    &resolution.episode_id[..8]
+                );
+            }
+            if !displaced_used.is_empty() {
+                tracing::warn!(
+                    "heal-replay collateral: {:?} lost previously used episodes from \
+                     top {k}: {displaced_used:?}",
+                    resolution.query
+                );
+            }
+
+            resolution.last_replay = Some(ReplayOutcome {
+                ts: chrono::Utc::now(),
+                rank,
+                held,
+                displaced_used: displaced_used.clone(),
+            });
+            self.store.log_resolution(&resolution)?;
+
+            entries.push(HealReplayEntry {
+                resolution_id: resolution.id.to_string(),
+                rating_id: resolution.rating_id,
+                query: resolution.query,
+                episode_id: resolution.episode_id,
+                validated_rank: resolution.validated_rank,
+                rank,
+                held,
+                displaced_used,
+            });
+        }
+
+        let held = entries.iter().filter(|e| e.held).count();
+        Ok(HealReplayReport {
+            total: entries.len(),
+            held,
+            regressed: entries.len() - held,
+            k,
+            entries,
+        })
     }
 
     pub fn recent_searches(&self, limit: usize) -> Result<Vec<SearchLogEntry>> {
@@ -420,12 +635,47 @@ impl Ecphory {
         self.store.recent_ratings(limit)
     }
 
+    pub fn recent_resolutions(&self, limit: usize) -> Result<Vec<ResolutionLogEntry>> {
+        self.store.recent_resolutions(limit)
+    }
+
     pub fn stats(&self) -> Result<RecorderStats> {
         let searches = self.store.recent_searches(0)?;
         let accesses = self.store.recent_accesses(0)?;
         let ratings = self.store.recent_ratings(0)?;
-        Ok(recorder::compute_stats(&searches, accesses.len(), &ratings))
+        let resolutions = self.store.recent_resolutions(0)?;
+        Ok(recorder::compute_stats(
+            &searches,
+            accesses.len(),
+            &ratings,
+            &resolutions,
+        ))
     }
+}
+
+/// Rank (1-based) of `id` within an ordered id list; None = not present.
+fn rank_in(ids: &[String], id: &str) -> Option<usize> {
+    ids.iter().position(|i| i == id).map(|p| p + 1)
+}
+
+/// The collateral-damage diff: protected episodes present in `before` but
+/// pushed out of `after` (the healed target itself excluded — it moving IN
+/// is the point). `protected` entries may be id prefixes.
+fn displaced_protected(
+    before: &[String],
+    after: &[String],
+    target_id: &str,
+    protected: &[String],
+) -> Vec<String> {
+    before
+        .iter()
+        .filter(|id| {
+            id.as_str() != target_id
+                && !after.contains(id)
+                && protected.iter().any(|p| id.starts_with(p.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -862,6 +1112,352 @@ mod tests {
         assert!(s.latency_us_max >= s.latency_us_p99);
         assert_eq!(s.top_queries[0].0, "capybaras");
         assert_eq!(s.top_queries[0].1, 4);
+    }
+
+    // ---- heal lifecycle ------------------------------------------------------
+
+    /// Rate the most recent search for `query` as a miss with an intended
+    /// target — the heal trigger.
+    fn rate_miss(svc: &mut Ecphory, query: &str, intended: &str) -> RatingLogEntry {
+        let out = svc.search(query, &SearchOptions::default()).unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        svc.rate_search(&sid, Rating::Miss, vec![], vec![intended.to_string()], None)
+            .unwrap()
+    }
+
+    #[test]
+    fn validated_heal_records_resolution_and_splits_status() {
+        let (mut svc, _d) = temp();
+        let target = ep("circus animals marching through downtown streets");
+        svc.insert(&target).unwrap();
+
+        let entry = rate_miss(&mut svc, "purple elephant parade", &target.id.to_string());
+        assert_eq!(entry.corrections[0].action, CorrectionAction::Enriched);
+
+        // The rating itself is untouched ground truth; the resolution is a
+        // separate record carrying everything a replay needs.
+        let resolutions = svc.recent_resolutions(10).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        let r = &resolutions[0];
+        assert_eq!(r.rating_id, entry.id.to_string());
+        assert_eq!(r.search_id, entry.search_id);
+        assert_eq!(r.query, "purple elephant parade");
+        assert_eq!(r.episode_id, target.id.to_string());
+        assert_eq!(r.validated_rank, 1);
+        assert!(r.top_k.contains(&target.id.to_string()));
+        assert!(r.last_replay.is_none());
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.rated_miss, 1);
+        assert_eq!(s.rated_miss_healed, 1);
+        assert_eq!(s.rated_miss_outstanding, 0);
+        assert_eq!(s.heals, 1);
+        assert_eq!(s.heals_regressed, 0);
+    }
+
+    #[test]
+    fn unhealed_miss_stays_outstanding() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("anything at all")).unwrap();
+
+        // Miss with no intended target: nothing to heal.
+        let out = svc
+            .search("no such topic here", &SearchOptions::default())
+            .unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        svc.rate_search(&sid, Rating::Miss, vec![], vec![], None)
+            .unwrap();
+
+        assert!(svc.recent_resolutions(10).unwrap().is_empty());
+        let s = svc.stats().unwrap();
+        assert_eq!(s.rated_miss, 1);
+        assert_eq!(s.rated_miss_healed, 0);
+        assert_eq!(s.rated_miss_outstanding, 1);
+    }
+
+    #[test]
+    fn already_ranking_miss_resolves_without_enrichment() {
+        let (mut svc, _d) = temp();
+        let e = ep("golf handicap scoring rules");
+        svc.insert(&e).unwrap();
+
+        // A stale miss: the target actually ranks. No phrase is added, but
+        // the miss is not outstanding either — the gap is closed.
+        let entry = rate_miss(&mut svc, "golf handicap", &e.id.to_string());
+        assert_eq!(entry.corrections[0].action, CorrectionAction::AlreadyRanks);
+        assert!(
+            svc.get_unrecorded(&e.id.to_string())
+                .unwrap()
+                .search_phrases
+                .is_empty()
+        );
+
+        let resolutions = svc.recent_resolutions(10).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].validated_rank, 1);
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.rated_miss_healed, 1);
+        assert_eq!(s.rated_miss_outstanding, 0);
+    }
+
+    #[test]
+    fn failed_correction_leaves_miss_outstanding() {
+        let (mut svc, _d) = temp();
+        let mut e = ep("content sharing nothing with the query vocabulary");
+        e.search_phrases = (0..8)
+            .map(|i| format!("existing phrase number {i}"))
+            .collect();
+        svc.insert(&e).unwrap();
+
+        let entry = rate_miss(&mut svc, "zebra quantum harmonica", &e.id.to_string());
+        assert_eq!(
+            entry.corrections[0].action,
+            CorrectionAction::PhraseCapReached
+        );
+
+        assert!(svc.recent_resolutions(10).unwrap().is_empty());
+        let s = svc.stats().unwrap();
+        assert_eq!(s.rated_miss_outstanding, 1);
+    }
+
+    #[test]
+    fn partial_heal_runs_corrections_but_records_no_resolution() {
+        let (mut svc, _d) = temp();
+        let target = ep("submarine sonar calibration procedure");
+        svc.insert(&target).unwrap();
+
+        let out = svc
+            .search("underwater ping tuning", &SearchOptions::default())
+            .unwrap();
+        let sid = out.search_id.unwrap().to_string();
+        let entry = svc
+            .rate_search(
+                &sid,
+                Rating::Partial,
+                vec![],
+                vec![target.id.to_string()],
+                None,
+            )
+            .unwrap();
+        assert_eq!(entry.corrections[0].action, CorrectionAction::Enriched);
+
+        // Resolutions track the miss lifecycle only — a partial was never
+        // "outstanding", so there is nothing to mark healed.
+        assert!(svc.recent_resolutions(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn heal_replay_reports_held_and_stores_outcome() {
+        let (mut svc, _d) = temp();
+        let target = ep("circus animals marching through downtown streets");
+        svc.insert(&target).unwrap();
+        rate_miss(&mut svc, "purple elephant parade", &target.id.to_string());
+
+        let report = svc.replay_heals(0).unwrap();
+        assert_eq!(report.total, 1);
+        assert_eq!(report.held, 1);
+        assert_eq!(report.regressed, 0);
+        assert_eq!(report.entries[0].rank, Some(1));
+        assert!(report.entries[0].held);
+
+        // The outcome is persisted on the resolution, so status sees it
+        // without re-searching.
+        let r = &svc.recent_resolutions(10).unwrap()[0];
+        let replay = r.last_replay.as_ref().expect("replay outcome stored");
+        assert!(replay.held);
+        assert_eq!(replay.rank, Some(1));
+        let s = svc.stats().unwrap();
+        assert_eq!(s.heals, 1);
+        assert_eq!(s.heals_regressed, 0);
+    }
+
+    #[test]
+    fn heal_replay_flags_regression() {
+        let (mut svc, _d) = temp();
+        let target = ep("circus animals marching through downtown streets");
+        svc.insert(&target).unwrap();
+        rate_miss(&mut svc, "purple elephant parade", &target.id.to_string());
+
+        // The heal held... until the target got demoted out of search.
+        assert_eq!(svc.replay_heals(0).unwrap().regressed, 0);
+        svc.demote(&target.id.to_string()).unwrap();
+
+        let report = svc.replay_heals(0).unwrap();
+        assert_eq!(report.total, 1);
+        assert_eq!(report.held, 0);
+        assert_eq!(report.regressed, 1);
+        assert_eq!(report.entries[0].rank, None);
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.heals_regressed, 1);
+        // The rating stream is untouched by replays: still one miss, healed.
+        assert_eq!(s.rated_miss, 1);
+        assert_eq!(s.rated_miss_healed, 1);
+    }
+
+    /// Six-episode displacement rig: d1..d4 and `crowded` all match the
+    /// contested query, with growing padding so BM25 length normalization
+    /// ranks `crowded` last (5th). Enriching a sixth episode into the top 5
+    /// must push `crowded` out.
+    fn displacement_rig(svc: &mut Ecphory) -> (Vec<Episode>, Episode, Episode) {
+        let pad = [
+            "",
+            "with extra notes about unrelated calibration steps",
+            "with extra notes about unrelated calibration steps and a long tail of \
+             miscellaneous observations",
+            "xenolith with extra notes about unrelated calibration steps and a long tail of \
+             miscellaneous observations gathered over several sessions",
+        ];
+        let decoys: Vec<Episode> = pad
+            .iter()
+            .map(|p| ep(&format!("quartz crystal resonance {p}")))
+            .collect();
+        let crowded = ep(
+            "quartz crystal resonance padparadscha with the longest padding of them all, \
+             extra notes about unrelated calibration steps and a long tail of miscellaneous \
+             observations gathered over several sessions plus appendices nobody reads",
+        );
+        let target = ep("piezoelectric oscillator drift measured on the bench meter");
+        for e in decoys.iter().chain([&crowded, &target]) {
+            svc.insert(e).unwrap();
+        }
+        (decoys, crowded, target)
+    }
+
+    #[test]
+    fn heal_collateral_warns_when_used_episode_is_displaced() {
+        let (mut svc, _d) = temp();
+        let (_decoys, crowded, target) = displacement_rig(&mut svc);
+
+        // Mark `crowded` as used — a prior rating proved its value.
+        let out = svc
+            .search("padparadscha", &SearchOptions::default())
+            .unwrap();
+        assert_eq!(out.results[0].episode.id, crowded.id);
+        let sid = out.search_id.unwrap().to_string();
+        svc.rate_search(
+            &sid,
+            Rating::Hit,
+            vec![crowded.id.to_string()],
+            vec![],
+            None,
+        )
+        .unwrap();
+
+        // Sanity: before the heal, `crowded` holds rank 5 for the query.
+        let before = svc
+            .search_unrecorded("quartz crystal resonance", &SearchOptions::default())
+            .unwrap();
+        assert_eq!(
+            before.results[4].episode.id, crowded.id,
+            "rig must place crowded at rank 5"
+        );
+
+        let entry = rate_miss(&mut svc, "quartz crystal resonance", &target.id.to_string());
+        let c = &entry.corrections[0];
+        assert_eq!(c.action, CorrectionAction::Enriched);
+        assert_eq!(
+            c.displaced_used,
+            vec![crowded.id.to_string()],
+            "the heal displaced a previously used episode out of top k — that must be flagged"
+        );
+
+        let r = &svc.recent_resolutions(10).unwrap()[0];
+        assert_eq!(r.displaced_used, vec![crowded.id.to_string()]);
+        assert!(!r.top_k.contains(&crowded.id.to_string()));
+    }
+
+    #[test]
+    fn heal_collateral_ignores_unprotected_displacement() {
+        let (mut svc, _d) = temp();
+        let (_decoys, _crowded, target) = displacement_rig(&mut svc);
+
+        // Same displacement, but nothing marked `crowded` as used — no
+        // rating ever vouched for it, so its displacement is not collateral.
+        let entry = rate_miss(&mut svc, "quartz crystal resonance", &target.id.to_string());
+        let c = &entry.corrections[0];
+        assert_eq!(c.action, CorrectionAction::Enriched);
+        assert!(c.displaced_used.is_empty());
+    }
+
+    #[test]
+    fn replay_collateral_warns_when_as_healed_topk_loses_used_episode() {
+        let (mut svc, _d) = temp();
+        let (decoys, _crowded, target) = displacement_rig(&mut svc);
+        rate_miss(&mut svc, "quartz crystal resonance", &target.id.to_string());
+
+        // d4 (in the as-healed top k) gets used, then vanishes from search.
+        let d4 = &decoys[3];
+        let out = svc.search("xenolith", &SearchOptions::default()).unwrap();
+        assert_eq!(out.results[0].episode.id, d4.id);
+        let sid = out.search_id.unwrap().to_string();
+        svc.rate_search(&sid, Rating::Hit, vec![d4.id.to_string()], vec![], None)
+            .unwrap();
+        svc.demote(&d4.id.to_string()).unwrap();
+
+        let report = svc.replay_heals(0).unwrap();
+        let e = &report.entries[0];
+        assert!(e.held, "the target itself still ranks");
+        assert_eq!(
+            e.displaced_used,
+            vec![d4.id.to_string()],
+            "a used episode fell out of the as-healed top k — warn"
+        );
+        let r = &svc.recent_resolutions(10).unwrap()[0];
+        assert_eq!(
+            r.last_replay.as_ref().unwrap().displaced_used,
+            vec![d4.id.to_string()]
+        );
+    }
+
+    // ---- source-tagged tape ---------------------------------------------------
+
+    #[test]
+    fn tagged_search_is_taped_with_origin_and_rateable() {
+        let (mut svc, _d) = temp();
+        let e = ep("tagged tape fodder about ospreys");
+        svc.insert(&e).unwrap();
+
+        let out = svc
+            .search_tagged(
+                "ospreys",
+                &SearchOptions::default(),
+                SearchOrigin::HealReplay,
+            )
+            .unwrap();
+        assert!(out.search_id.is_some(), "tagged searches are on the tape");
+
+        let searches = svc.recent_searches(10).unwrap();
+        assert_eq!(searches.len(), 1);
+        assert_eq!(searches[0].origin, SearchOrigin::HealReplay);
+    }
+
+    #[test]
+    fn stats_count_organic_only_and_surface_synthetic() {
+        let (mut svc, _d) = temp();
+        svc.insert(&ep("stats fodder about capybaras")).unwrap();
+
+        svc.search("capybaras", &SearchOptions::default()).unwrap();
+        for _ in 0..3 {
+            svc.search_tagged("capybaras", &SearchOptions::default(), SearchOrigin::Eval)
+                .unwrap();
+        }
+        svc.search_tagged(
+            "capybaras",
+            &SearchOptions::default(),
+            SearchOrigin::HealReplay,
+        )
+        .unwrap();
+
+        let s = svc.stats().unwrap();
+        assert_eq!(s.searches, 1, "only the organic search is workload");
+        assert_eq!(s.synthetic, 4);
+        assert_eq!(
+            s.top_queries[0],
+            ("capybaras".to_string(), 1),
+            "tagged replays must not inflate top_queries"
+        );
     }
 
     #[test]

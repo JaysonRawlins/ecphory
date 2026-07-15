@@ -150,6 +150,15 @@ pub struct LoggedSearch {
     pub query: String,
     pub result_count: usize,
     pub results: Vec<LoggedHit>,
+    /// Tape provenance; absent on pre-0.4 rows (all organic).
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+impl LoggedSearch {
+    fn is_organic(&self) -> bool {
+        self.origin.as_deref().is_none_or(|o| o == "organic")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,12 +203,33 @@ impl EvalClient {
             .map_err(|e| Error::Storage(format!("decoding {url}: {e}")))
     }
 
+    fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base, path);
+        let mut req = ureq::post(&url);
+        if let Some(token) = &self.token {
+            req = req.header("Authorization", &format!("Bearer {token}"));
+        }
+        let mut resp = req
+            .send_json(body)
+            .map_err(|e| Error::Storage(format!("POST {url}: {e}")))?;
+        resp.body_mut()
+            .read_json()
+            .map_err(|e| Error::Storage(format!("decoding {url}: {e}")))
+    }
+
     pub fn search(&self, query: &str, k: usize) -> Result<(f64, Vec<String>)> {
         let encoded: String = url_encode(query);
-        // no_record: eval replays are not workload signal — recording them
-        // would pollute the very tape this eval scores (observer effect).
+        // origin=eval: replays are not workload signal. They used to bypass
+        // the tape outright (no_record); tagging keeps them visible and
+        // filterable while top-queries and the aggregates ignore them —
+        // and the from-log analysis reads the tape before replaying, so
+        // same-run recording can't feed back into what it scores.
         let resp: SearchResponse = self.get_json(&format!(
-            "/api/v1/memory/search?query={encoded}&max_results={k}&no_record=true"
+            "/api/v1/memory/search?query={encoded}&max_results={k}&origin=eval"
         ))?;
         Ok((
             resp.latency_ms,
@@ -233,6 +263,33 @@ impl EvalClient {
         let w: Wrap = self.get_json(&format!("/api/v1/memory/rating-log?limit={limit}"))?;
         Ok(w.ratings)
     }
+
+    /// Run the heal-replay pass daemon-side (it writes replay outcomes back
+    /// onto the resolutions) and fetch the report.
+    pub fn heal_replay(&self, k: usize) -> Result<HealReport> {
+        self.post_json("/api/v1/memory/heal-replay", serde_json::json!({ "k": k }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HealReport {
+    pub total: usize,
+    pub held: usize,
+    pub regressed: usize,
+    pub k: usize,
+    pub entries: Vec<HealEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HealEntry {
+    pub query: String,
+    pub episode_id: String,
+    pub validated_rank: usize,
+    #[serde(default)]
+    pub rank: Option<usize>,
+    pub held: bool,
+    #[serde(default)]
+    pub displaced_used: Vec<String>,
 }
 
 fn url_encode(s: &str) -> String {
@@ -354,6 +411,50 @@ pub fn run_gold(
     Ok(true)
 }
 
+// ---- heal-replay mode ---------------------------------------------------------
+
+/// Replay every healed miss as a regression test: does the intended episode
+/// still rank within top k for the original failed query? Returns false when
+/// any heal regressed (drift-guard semantics, like --min-mrr). Collateral
+/// displacement is reported but never fails the pass.
+pub fn run_heals(client: &EvalClient, k: usize) -> Result<bool> {
+    let report = client.heal_replay(k)?;
+    if report.total == 0 {
+        println!("heal replay: no heals recorded yet — misses that self-correct will show up here");
+        return Ok(true);
+    }
+
+    println!("heal replay: {} heals, k={}", report.total, report.k);
+    for e in &report.entries {
+        println!(
+            "  {:<9} {:?} -> {} | validated {} | now {}",
+            if e.held { "held" } else { "REGRESSED" },
+            truncate(&e.query, 48),
+            &e.episode_id[..8.min(e.episode_id.len())],
+            e.validated_rank,
+            e.rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "MISS".into()),
+        );
+        if !e.displaced_used.is_empty() {
+            let displaced: Vec<&str> = e
+                .displaced_used
+                .iter()
+                .map(|id| &id[..8.min(id.len())])
+                .collect();
+            println!(
+                "            collateral: displaced used episodes [{}]",
+                displaced.join(", ")
+            );
+        }
+    }
+    println!("  {} held, {} regressed", report.held, report.regressed);
+    if report.regressed > 0 {
+        println!("FAIL: {} heal(s) regressed", report.regressed);
+    }
+    Ok(report.regressed == 0)
+}
+
 // ---- from-log mode -----------------------------------------------------------
 
 /// Entries per UTC second at or above which a cluster is treated as
@@ -427,9 +528,21 @@ pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<b
         }
     }
 
-    // Synthetic-traffic guard: burst clusters (same-second floods from
-    // benchmarks, replays, bulk jobs) are not usage signal.
-    let (searches, dropped_s) = drop_bursts(raw_searches, |s: &LoggedSearch| s.ts);
+    // Synthetic-traffic guards. Tagged entries (eval/backfill/heal-replay)
+    // declare themselves; the burst heuristic stays for pre-tag rows and
+    // anything that forgot to tag.
+    let before = raw_searches.len();
+    let organic: Vec<LoggedSearch> = raw_searches
+        .into_iter()
+        .filter(|s| s.is_organic())
+        .collect();
+    let dropped_tagged = before - organic.len();
+    if dropped_tagged > 0 {
+        println!(
+            "origin filter: dropped {dropped_tagged} tagged searches (eval/backfill/heal-replay)"
+        );
+    }
+    let (searches, dropped_s) = drop_bursts(organic, |s: &LoggedSearch| s.ts);
     let (accesses, dropped_a) = drop_bursts(raw_accesses, |a: &LoggedAccess| a.ts);
     if dropped_s + dropped_a > 0 {
         println!(

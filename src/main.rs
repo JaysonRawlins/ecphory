@@ -127,6 +127,13 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Heal resolutions (validated miss self-corrections), newest first.
+    /// Ratings are immutable; these are the layer that records which misses
+    /// were closed, and how the last replay pass went.
+    Heals {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Serve MCP over stdio (single client; prefer `serve` for shared use)
     Mcp,
     /// Serve MCP over streamable HTTP on localhost — one daemon, many sessions
@@ -144,6 +151,11 @@ enum Command {
         /// searches (used-signal) and reports taped vs replayed ranks
         #[arg(long)]
         from_log: bool,
+        /// Heal-replay regression pass: re-run every healed miss's original
+        /// query against the live index and verify the intended episode
+        /// still ranks within top k. Exits non-zero if any heal regressed.
+        #[arg(long)]
+        heals: bool,
         /// Daemon base URL
         #[arg(long, default_value = "http://127.0.0.1:3491")]
         url: String,
@@ -196,6 +208,7 @@ fn main() -> anyhow::Result<()> {
     if let Command::Eval {
         gold,
         from_log,
+        heals,
         url,
         k,
         min_mrr,
@@ -214,8 +227,11 @@ fn main() -> anyhow::Result<()> {
         if *from_log {
             ok &= eval::run_from_log(&client, *k, *window)?;
         }
-        if gold.is_none() && !from_log {
-            anyhow::bail!("eval needs --gold <file> and/or --from-log");
+        if *heals {
+            ok &= eval::run_heals(&client, *k)?;
+        }
+        if gold.is_none() && !from_log && !heals {
+            anyhow::bail!("eval needs --gold <file>, --from-log, and/or --heals");
         }
         if !ok {
             std::process::exit(1);
@@ -421,6 +437,31 @@ fn main() -> anyhow::Result<()> {
                         .as_deref()
                         .map(|n| format!("  — {n}"))
                         .unwrap_or_default()
+                );
+            }
+        }
+        Command::Heals { limit } => {
+            for r in svc.recent_resolutions(limit)? {
+                let replay = match &r.last_replay {
+                    None => "unreplayed".to_string(),
+                    Some(o) if o.held => format!(
+                        "held (rank {})",
+                        o.rank.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+                    ),
+                    Some(_) => "REGRESSED".to_string(),
+                };
+                println!(
+                    "{}  {:<20}  {:?} -> {}  validated {}{}",
+                    r.ts.format("%Y-%m-%d %H:%M:%S"),
+                    replay,
+                    r.query,
+                    &r.episode_id[..8.min(r.episode_id.len())],
+                    r.validated_rank,
+                    if r.displaced_used.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  displaced [{}]", r.displaced_used.join(", "))
+                    }
                 );
             }
         }

@@ -85,6 +85,12 @@ pub struct SearchRequest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub include_deleted: bool,
+    /// Tape provenance for synthetic traffic: "eval", "backfill", or
+    /// "heal-replay". Leave empty for normal use (organic). Tagged searches
+    /// are recorded but excluded from top-queries and workload aggregates —
+    /// use this for bulk sweeps so they don't pollute the usage signal.
+    #[serde(default)]
+    pub origin: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -215,9 +221,13 @@ impl McpServer {
         description = "Search memories (BM25 over content, names, and search phrases). Returns ranked episodes with scores, plus a search_id — after you've read the results and know whether they answered the question, pass that search_id to rate_search."
     )]
     fn search(&self, Parameters(req): Parameters<SearchRequest>) -> Result<String, ErrorData> {
+        let origin: crate::recorder::SearchOrigin = req
+            .origin
+            .parse()
+            .map_err(|e: String| ErrorData::invalid_params(e, None))?;
         let svc = self.svc.lock().map_err(internal)?;
         let out = svc
-            .search(
+            .search_tagged(
                 &req.query,
                 &SearchOptions {
                     limit: if req.max_results == 0 {
@@ -230,6 +240,7 @@ impl McpServer {
                     source: opt_str(req.source),
                     tags: req.tags,
                 },
+                origin,
             )
             .map_err(internal)?;
         let results: Vec<_> = out
