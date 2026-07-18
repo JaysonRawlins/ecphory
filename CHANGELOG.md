@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/JaysonRawlins/ecphory/compare/v0.3.4...v0.3.5) - 2026-07-18
+
+### Fixed
+
+- count healed old misses out of rated_miss_outstanding ([#17](https://github.com/JaysonRawlins/ecphory/pull/17))
+
 ## [0.3.4](https://github.com/JaysonRawlins/ecphory/compare/v0.3.3...v0.3.4) - 2026-07-15
 
 ### Added
