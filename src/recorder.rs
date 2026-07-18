@@ -275,9 +275,11 @@ pub struct RecorderStats {
     pub rated_hit: usize,
     pub rated_partial: usize,
     pub rated_miss: usize,
-    /// rated_miss split by resolution state: healed misses have at least one
-    /// validated resolution; outstanding ones still need work. The split is
-    /// a layer over the immutable ratings — rated_miss itself never shrinks.
+    /// rated_miss split by resolution state, joined on search_id: a miss is
+    /// healed when its search has a validated resolution (including the
+    /// additive heal re-rate that produced it); outstanding ones still need
+    /// work. The split is a layer over the immutable ratings — rated_miss
+    /// itself never shrinks.
     pub rated_miss_outstanding: usize,
     pub rated_miss_healed: usize,
     /// Heal lifecycle: total validated resolutions (permanent), and how many
@@ -315,12 +317,20 @@ pub fn compute_stats(
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(10);
 
-    let resolved: std::collections::HashSet<&str> =
-        resolutions.iter().map(|r| r.rating_id.as_str()).collect();
+    // Resolution join is keyed on search_id, NOT rating_id: healing an old
+    // miss is additive — it mints a new immutable miss rating on the same
+    // search and points the resolution at that new rating's id. Keying on
+    // rating_id would leave the original miss row outstanding forever, since
+    // its own id never appears in the resolution log. Both the original and
+    // the heal re-rate share the search_id, so any miss whose search is
+    // resolved is retired. rated_miss stays the raw immutable count (first-
+    // contact ground truth); the fix lives entirely in the aggregation.
+    let resolved_search_ids: std::collections::HashSet<&str> =
+        resolutions.iter().map(|r| r.search_id.as_str()).collect();
     let rated_miss = ratings.iter().filter(|r| r.rating == Rating::Miss).count();
     let rated_miss_healed = ratings
         .iter()
-        .filter(|r| r.rating == Rating::Miss && resolved.contains(r.id.to_string().as_str()))
+        .filter(|r| r.rating == Rating::Miss && resolved_search_ids.contains(r.search_id.as_str()))
         .count();
 
     RecorderStats {
@@ -456,27 +466,30 @@ mod tests {
     #[test]
     fn stats_split_misses_by_resolution_state() {
         let ts = Utc::now();
-        let mk_rating = |id: Uuid, rating| RatingLogEntry {
+        let mk_rating = |id: Uuid, search_id: &str, rating| RatingLogEntry {
             id,
             ts,
-            search_id: "s".into(),
+            search_id: search_id.into(),
             rating,
             used_episode_ids: vec![],
             intended_episode_ids: vec![],
             corrections: vec![],
             note: None,
         };
-        let healed_id = Uuid::now_v7();
+        // Two distinct searches: "s_healed" has a resolution, "s_open" does
+        // not. (Sharing one search_id would model the additive-heal case,
+        // where BOTH misses on that search retire — see the dedicated test.)
+        let healed_rating = Uuid::now_v7();
         let ratings = vec![
-            mk_rating(healed_id, Rating::Miss),
-            mk_rating(Uuid::now_v7(), Rating::Miss),
-            mk_rating(Uuid::now_v7(), Rating::Hit),
+            mk_rating(healed_rating, "s_healed", Rating::Miss),
+            mk_rating(Uuid::now_v7(), "s_open", Rating::Miss),
+            mk_rating(Uuid::now_v7(), "s_hit", Rating::Hit),
         ];
         let resolutions = vec![ResolutionLogEntry {
             id: Uuid::now_v7(),
             ts,
-            rating_id: healed_id.to_string(),
-            search_id: "s".into(),
+            rating_id: healed_rating.to_string(),
+            search_id: "s_healed".into(),
             query: "q".into(),
             episode_id: "e".into(),
             validated_rank: 1,
@@ -496,5 +509,59 @@ mod tests {
         assert_eq!(s.rated_miss_outstanding, 1);
         assert_eq!(s.heals, 1);
         assert_eq!(s.heals_regressed, 1);
+    }
+
+    /// Regression for the rated_miss_outstanding over-report (issue #16):
+    /// healing an old miss is additive — it mints a NEW immutable miss rating
+    /// on the same search_id and points the resolution at the new rating's id,
+    /// never at the original. Keying the resolution join on rating_id left the
+    /// original miss outstanding forever; keying on search_id retires both the
+    /// original and the heal re-rate, while a separate unresolved miss on a
+    /// different search stays counted.
+    #[test]
+    fn healed_old_miss_leaves_outstanding_original_and_heal_both_retire() {
+        let ts = Utc::now();
+        let mk_miss = |id: Uuid, search_id: &str| RatingLogEntry {
+            id,
+            ts,
+            search_id: search_id.into(),
+            rating: Rating::Miss,
+            used_episode_ids: vec![],
+            intended_episode_ids: vec![],
+            corrections: vec![],
+            note: None,
+        };
+
+        // The immutable original miss (its id is NEVER referenced by any
+        // resolution) and the additive heal re-rate, both on search "s_healed".
+        let original = mk_miss(Uuid::now_v7(), "s_healed");
+        let heal_rerate = mk_miss(Uuid::now_v7(), "s_healed");
+        // A genuinely unresolved miss on a different search.
+        let unresolved = mk_miss(Uuid::now_v7(), "s_open");
+        let ratings = vec![original, heal_rerate.clone(), unresolved];
+
+        // The resolution points at the HEAL re-rate's id, not the original's.
+        let resolutions = vec![ResolutionLogEntry {
+            id: Uuid::now_v7(),
+            ts,
+            rating_id: heal_rerate.id.to_string(),
+            search_id: "s_healed".into(),
+            query: "q".into(),
+            episode_id: "e".into(),
+            validated_rank: 2,
+            top_k: vec![],
+            displaced_used: vec![],
+            last_replay: None,
+        }];
+
+        let s = compute_stats(&[], 0, &ratings, &resolutions);
+        // Raw immutable count is untouched: three miss rows.
+        assert_eq!(s.rated_miss, 3);
+        // Both misses on the resolved search retire (original + heal re-rate).
+        assert_eq!(s.rated_miss_healed, 2);
+        // Only the genuinely unresolved miss stays outstanding — under the old
+        // rating_id join this was 2 (the original never left the count).
+        assert_eq!(s.rated_miss_outstanding, 1);
+        assert_eq!(s.heals, 1);
     }
 }
