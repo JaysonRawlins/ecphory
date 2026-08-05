@@ -100,6 +100,14 @@ pub struct IdRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct RestoreVersionRequest {
+    /// Full episode UUID or a unique prefix.
+    pub id: String,
+    /// Archived version UUID or a unique prefix from get_episode_versions.
+    pub version_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct GetEpisodeRequest {
     /// Full episode UUID or a unique prefix (8+ chars is usually enough).
     pub id: String,
@@ -387,6 +395,24 @@ impl McpServer {
         to_json(&serde_json::json!({ "count": versions.len(), "versions": versions }))
     }
 
+    #[tool(
+        description = "Restore an archived episode version exactly, including empty fields and deletion/expiration state. The displaced current state is archived first, so the rollback is itself reversible. Use a version_id returned by get_episode_versions."
+    )]
+    fn restore_episode_version(
+        &self,
+        Parameters(req): Parameters<RestoreVersionRequest>,
+    ) -> Result<String, ErrorData> {
+        let mut svc = self.svc.lock().map_err(internal)?;
+        let ep = svc
+            .restore_version(&req.id, &req.version_id)
+            .map_err(not_found)?;
+        to_json(&serde_json::json!({
+            "success": true,
+            "id": ep.id,
+            "restored_version_id": req.version_id,
+        }))
+    }
+
     #[tool(description = "Store status: episode count and recorder aggregates.")]
     fn get_status(&self) -> Result<String, ErrorData> {
         let svc = self.svc.lock().map_err(internal)?;
@@ -420,7 +446,8 @@ impl ServerHandler for McpServer {
              search_id as miss with intended_episode_ids=[that id] — the store self-corrects \
              so that phrasing finds it next time. For bulk or \
              maintenance reads, pass no_record=true to get_episode so they don't pollute \
-             the usage signal.",
+             the usage signal. Updates are versioned: get_episode_versions lists archived \
+             snapshots and restore_episode_version rolls one back exactly.",
             )
     }
 }

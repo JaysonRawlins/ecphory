@@ -82,7 +82,7 @@ pub struct UpdateParams {
 pub struct EpisodeVersion {
     pub version_id: Uuid,
     pub archived_at: DateTime<Utc>,
-    /// "update", "delete", or "restore"
+    /// "update", "delete", "restore", or "rollback"
     pub operation: String,
     pub episode: Episode,
 }

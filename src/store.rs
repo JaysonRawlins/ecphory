@@ -184,6 +184,89 @@ impl Store {
         })
     }
 
+    /// Replace the current episode with an archived snapshot and archive the
+    /// displaced current state in the same transaction.
+    pub fn restore_version(
+        &self,
+        id_or_prefix: &str,
+        version_id_or_prefix: &str,
+    ) -> Result<Episode> {
+        let id = self.resolve_id(id_or_prefix)?;
+        let episode_key = id.to_string();
+        let version_needle = version_id_or_prefix.trim().to_lowercase();
+        if version_needle.is_empty() {
+            return Err(Error::VersionNotFound {
+                episode_id: episode_key,
+                version: version_id_or_prefix.to_string(),
+            });
+        }
+
+        let tx = self.db.begin_write()?;
+        let target = {
+            let prefix = format!("{id}/");
+            let vtable = tx.open_table(VERSIONS)?;
+            let mut matched: Option<EpisodeVersion> = None;
+            for entry in vtable.range(prefix.as_str()..)? {
+                let (key, value) = entry?;
+                if !key.value().starts_with(prefix.as_str()) {
+                    break;
+                }
+                let version: EpisodeVersion = serde_json::from_slice(value.value())?;
+                if !version.version_id.to_string().starts_with(&version_needle) {
+                    continue;
+                }
+                if matched.is_some() {
+                    return Err(Error::AmbiguousVersionPrefix {
+                        episode_id: episode_key,
+                        version: version_id_or_prefix.to_string(),
+                    });
+                }
+                matched = Some(version);
+            }
+            matched.ok_or_else(|| Error::VersionNotFound {
+                episode_id: episode_key.clone(),
+                version: version_id_or_prefix.to_string(),
+            })?
+        };
+
+        if target.episode.id != id {
+            return Err(Error::Storage(format!(
+                "archived version {} belongs to {}, expected {id}",
+                target.version_id, target.episode.id
+            )));
+        }
+
+        let restored = {
+            let mut table = tx.open_table(EPISODES)?;
+            let current: Episode = match table.get(episode_key.as_str())? {
+                Some(guard) => serde_json::from_slice(guard.value())?,
+                None => return Err(Error::NotFound(id_or_prefix.to_string())),
+            };
+
+            let displaced = EpisodeVersion {
+                version_id: Uuid::now_v7(),
+                archived_at: Utc::now(),
+                operation: "rollback".to_string(),
+                episode: current,
+            };
+            let version_key = format!(
+                "{id}/{}/{}",
+                displaced.archived_at.to_rfc3339(),
+                displaced.version_id
+            );
+            let version_value = serde_json::to_vec(&displaced)?;
+            let mut vtable = tx.open_table(VERSIONS)?;
+            vtable.insert(version_key.as_str(), version_value.as_slice())?;
+
+            let restored = target.episode;
+            let value = serde_json::to_vec(&restored)?;
+            table.insert(episode_key.as_str(), value.as_slice())?;
+            restored
+        };
+        tx.commit()?;
+        Ok(restored)
+    }
+
     /// Hard-delete a DEMOTED episode: the record and its entire archived
     /// version history, in one write transaction. Refuses episodes that are
     /// not already demoted (two-phase delete; no force path) — the operator
@@ -510,6 +593,63 @@ mod tests {
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].operation, "update");
         assert_eq!(versions[0].episode.content, "original content");
+    }
+
+    #[test]
+    fn restore_version_restores_exact_snapshot_and_archives_displaced_state() {
+        let (store, _dir) = temp_store();
+        let original = sample("original content");
+        store.insert(&original).unwrap();
+
+        let expires = Utc::now() + chrono::Duration::days(1);
+        let revised = store
+            .update(
+                &original.id.to_string(),
+                UpdateParams {
+                    name: Some("revised name".into()),
+                    content: Some("revised content".into()),
+                    search_phrases: Some(vec!["revised cue".into()]),
+                    tags: Some(vec!["revised".into()]),
+                    expired_at: Some(expires),
+                    metadata: Some(serde_json::json!({"state": "revised"})),
+                },
+            )
+            .unwrap();
+        let original_version = store.versions(&original.id.to_string()).unwrap()[0].clone();
+
+        let restored = store
+            .restore_version(
+                &original.id.to_string(),
+                &original_version.version_id.to_string()[..12],
+            )
+            .unwrap();
+        assert_eq!(restored, original);
+
+        let versions = store.versions(&original.id.to_string()).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[1].operation, "rollback");
+        assert_eq!(versions[1].episode, revised);
+
+        let revised_version = versions[1].version_id;
+        let restored_again = store
+            .restore_version(&original.id.to_string(), &revised_version.to_string())
+            .unwrap();
+        assert_eq!(restored_again, revised);
+        assert_eq!(store.versions(&original.id.to_string()).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn missing_version_refuses_without_archiving_or_mutating() {
+        let (store, _dir) = temp_store();
+        let ep = sample("unchanged");
+        store.insert(&ep).unwrap();
+
+        match store.restore_version(&ep.id.to_string(), "ffffffff") {
+            Err(Error::VersionNotFound { .. }) => {}
+            other => panic!("expected VersionNotFound, got {other:?}"),
+        }
+        assert_eq!(store.get(&ep.id.to_string()).unwrap(), ep);
+        assert!(store.versions(&ep.id.to_string()).unwrap().is_empty());
     }
 
     #[test]

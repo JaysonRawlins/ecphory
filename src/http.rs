@@ -34,6 +34,10 @@ pub fn build_router(state: Shared) -> Router {
         )
         .route("/memory/episodes/{id}/restore", post(restore_episode))
         .route("/memory/episodes/{id}/versions", get(episode_versions))
+        .route(
+            "/memory/episodes/{id}/versions/{version_id}/restore",
+            post(restore_episode_version),
+        )
         .route("/memory/search-log", get(search_log))
         .route("/memory/access-log", get(access_log))
         .route("/memory/rating-log", get(rating_log))
@@ -99,10 +103,12 @@ fn err(code: StatusCode, message: impl Into<String>) -> Response {
 fn map_err(e: crate::error::Error) -> Response {
     use crate::error::Error;
     match &e {
-        Error::NotFound(_) => err(StatusCode::NOT_FOUND, e.to_string()),
-        Error::AmbiguousPrefix(_) | Error::HardDeleteRefused => {
-            err(StatusCode::BAD_REQUEST, e.to_string())
+        Error::NotFound(_) | Error::VersionNotFound { .. } => {
+            err(StatusCode::NOT_FOUND, e.to_string())
         }
+        Error::AmbiguousPrefix(_)
+        | Error::AmbiguousVersionPrefix { .. }
+        | Error::HardDeleteRefused => err(StatusCode::BAD_REQUEST, e.to_string()),
         _ => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -358,6 +364,22 @@ async fn episode_versions(State(state): State<Shared>, Path(id): Path<String>) -
     let svc = state.svc.lock().expect("service lock");
     match svc.versions(&id) {
         Ok(vs) => Json(json!({"count": vs.len(), "versions": vs})).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+async fn restore_episode_version(
+    State(state): State<Shared>,
+    Path((id, version_id)): Path<(String, String)>,
+) -> Response {
+    let mut svc = state.svc.lock().expect("service lock");
+    match svc.restore_version(&id, &version_id) {
+        Ok(ep) => Json(json!({
+            "success": true,
+            "id": ep.id,
+            "restored_version_id": version_id,
+        }))
+        .into_response(),
         Err(e) => map_err(e),
     }
 }

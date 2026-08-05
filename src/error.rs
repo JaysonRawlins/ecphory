@@ -8,6 +8,14 @@ pub enum Error {
     #[error("ambiguous episode id prefix {0:?} matches multiple episodes; use more characters")]
     AmbiguousPrefix(String),
 
+    #[error("archived version {version:?} not found for episode {episode_id}")]
+    VersionNotFound { episode_id: String, version: String },
+
+    #[error(
+        "archived version prefix {version:?} matches multiple versions of episode {episode_id}; use more characters"
+    )]
+    AmbiguousVersionPrefix { episode_id: String, version: String },
+
     // Constructed by the MCP delete handler (M4); the store itself never
     // hard-deletes on the agent path.
     #[allow(dead_code)]

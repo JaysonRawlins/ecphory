@@ -104,6 +104,8 @@ enum Command {
     },
     /// Show the archived version history of an episode
     Versions { id: String },
+    /// Restore an archived version, archiving the displaced current state
+    Rollback { id: String, version_id: String },
     /// Import episodes from an engram git-export mirror directory
     Import {
         #[arg(long)]
@@ -458,6 +460,10 @@ fn main() -> anyhow::Result<()> {
         Command::Versions { id } => {
             let versions = svc.versions(&id)?;
             println!("{}", serde_json::to_string_pretty(&versions)?);
+        }
+        Command::Rollback { id, version_id } => {
+            let ep = svc.restore_version(&id, &version_id)?;
+            println!("restored {} from archived version {version_id}", ep.id);
         }
         Command::Import { dir } => {
             let started = std::time::Instant::now();

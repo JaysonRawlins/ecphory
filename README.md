@@ -54,6 +54,13 @@ Deletion is two-phase, and the phases have different owners:
    daemon's scheduled export commits. The daemon holds the store lock, so
    stop it before purging.
 
+Version rollback is separate from deletion restore. `restore_episode` and
+`ecphory restore` only reverse demotion. To roll back an update, list snapshots
+with `get_episode_versions` / `ecphory versions`, then restore one with
+`restore_episode_version` / `ecphory rollback <id> <version-id>`. Rollback
+restores the snapshot exactly and archives the displaced current state first,
+so the rollback is itself reversible.
+
 **What purge cannot do** — the honest limits, for the leak-response case:
 flight-recorder rows that reference a purged id survive (they hold ids,
 ranks, and scores only — no content — and age out with recorder retention),

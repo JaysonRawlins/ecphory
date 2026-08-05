@@ -211,6 +211,13 @@ impl Ecphory {
         Ok(ep)
     }
 
+    pub fn restore_version(&mut self, id: &str, version_id: &str) -> Result<Episode> {
+        let ep = self.store.restore_version(id, version_id)?;
+        self.index.upsert(&ep)?;
+        self.index.commit()?;
+        Ok(ep)
+    }
+
     pub fn versions(&self, id: &str) -> Result<Vec<crate::model::EpisodeVersion>> {
         self.store.versions(id)
     }
@@ -377,10 +384,9 @@ impl Ecphory {
     /// must reference a real search-log entry — garbage ids are refused so
     /// the rating stream stays joinable.
     ///
-    /// A non-hit rating with known targets (intended ∪ used) triggers the
-    /// self-correction loop per target: enrich → redo → validate. The taped
-    /// query is ground-truth asking vocabulary, so a validated enrichment
-    /// permanently closes that vocabulary gap.
+    /// A non-hit rating with explicit intended targets triggers the
+    /// self-correction loop per target: enrich → redo → validate. Used ids
+    /// are consumption telemetry only and never mutate episodes.
     pub fn rate_search(
         &mut self,
         search_id: &str,
@@ -397,12 +403,12 @@ impl Ecphory {
         let mut corrections = Vec::new();
         let mut resolutions: Vec<ResolutionLogEntry> = Vec::new();
         if rating != Rating::Hit {
-            let mut targets: Vec<String> = intended_episode_ids
-                .iter()
-                .chain(used_episode_ids.iter())
-                .cloned()
-                .collect();
-            targets.dedup();
+            let mut targets: Vec<String> = Vec::new();
+            for target in &intended_episode_ids {
+                if !targets.contains(target) {
+                    targets.push(target.clone());
+                }
+            }
             let protected = self.protected_episode_ids()?;
             for target in &targets {
                 let (correction, top_k) = self.self_correct(&search.query, target, &protected);
@@ -1026,6 +1032,35 @@ mod tests {
     }
 
     #[test]
+    fn used_episode_ids_never_trigger_self_correction() {
+        let (mut svc, _d) = temp();
+        let target = ep("submarine sonar calibration procedure");
+        svc.insert(&target).unwrap();
+        let out = svc
+            .search("underwater ping tuning", &SearchOptions::default())
+            .unwrap();
+        assert!(out.results.is_empty());
+
+        let entry = svc
+            .rate_search(
+                &out.search_id.unwrap().to_string(),
+                Rating::Partial,
+                vec![target.id.to_string()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert!(entry.corrections.is_empty());
+        assert_eq!(entry.used_episode_ids, vec![target.id.to_string()]);
+        assert!(
+            svc.get_unrecorded(&target.id.to_string())
+                .unwrap()
+                .search_phrases
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn already_ranking_target_is_left_alone() {
         let (mut svc, _d) = temp();
         let e = ep("alpha bravo charlie delta");
@@ -1285,6 +1320,34 @@ mod tests {
         // Resolutions track the miss lifecycle only — a partial was never
         // "outstanding", so there is nothing to mark healed.
         assert!(svc.recent_resolutions(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_version_updates_the_search_index() {
+        let (mut svc, _d) = temp();
+        let original = ep("oranges from the winter greenhouse");
+        svc.insert(&original).unwrap();
+        svc.update(
+            &original.id.to_string(),
+            UpdateParams {
+                content: Some("bananas from the summer market".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let version_id = svc.versions(&original.id.to_string()).unwrap()[0].version_id;
+
+        svc.restore_version(&original.id.to_string(), &version_id.to_string())
+            .unwrap();
+
+        let oranges = svc
+            .search_unrecorded("winter greenhouse", &SearchOptions::default())
+            .unwrap();
+        assert_eq!(oranges.results[0].episode.id, original.id);
+        let bananas = svc
+            .search_unrecorded("summer market", &SearchOptions::default())
+            .unwrap();
+        assert!(bananas.results.iter().all(|r| r.episode.id != original.id));
     }
 
     #[test]

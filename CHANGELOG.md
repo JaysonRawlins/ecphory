@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- atomic archived-version rollback through MCP, REST, and CLI
+
+### Fixed
+
+- keep `used_episode_ids` as telemetry instead of self-correction targets
+
 ## [0.3.5](https://github.com/JaysonRawlins/ecphory/compare/v0.3.4...v0.3.5) - 2026-07-18
 
 ### Fixed
