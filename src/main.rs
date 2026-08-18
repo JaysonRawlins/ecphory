@@ -9,6 +9,7 @@ mod model;
 mod recorder;
 mod service;
 mod store;
+mod triggers;
 
 use std::path::PathBuf;
 
