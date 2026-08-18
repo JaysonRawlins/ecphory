@@ -24,7 +24,19 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 /// change an existing episode's content — the drift class this feature
 /// exists to close.
 const DEFAULT_EVENTS: &[&str] = &["update", "restore", "restore_version"];
-const KNOWN_EVENTS: &[&str] = &["insert", "update", "demote", "restore", "restore_version"];
+const KNOWN_EVENTS: &[&str] = &[
+    "insert",
+    "update",
+    "demote",
+    "restore",
+    "restore_version",
+    "export",
+];
+
+/// Store-wide events carry no episode, so the episode matcher doesn't apply.
+/// `export` fires after a committed mirror export — the offsite-sync hook
+/// (aws s3 sync, restic, rclone; ecphory stays out of the credential business).
+const STORE_EVENTS: &[&str] = &["export"];
 
 #[derive(Debug, Deserialize)]
 struct TriggersConfig {
@@ -125,14 +137,6 @@ impl TriggerEngine {
                     spec.run[0]
                 );
             }
-            // A trigger with no matcher would fire an external command on
-            // every write in the store. That is never what anyone meant.
-            if spec.matcher.is_empty() {
-                anyhow::bail!(
-                    "trigger {:?}: match must set tags_any and/or id_prefix",
-                    spec.name
-                );
-            }
             for ev in &spec.events {
                 if !KNOWN_EVENTS.contains(&ev.as_str()) {
                     anyhow::bail!(
@@ -140,6 +144,20 @@ impl TriggerEngine {
                         spec.name
                     );
                 }
+            }
+            // A trigger with no matcher would fire an external command on
+            // every write in the store. That is never what anyone meant —
+            // except for store-wide events, which have no episode to match.
+            let episode_scoped = spec.events.is_empty()
+                || spec
+                    .events
+                    .iter()
+                    .any(|e| !STORE_EVENTS.contains(&e.as_str()));
+            if episode_scoped && spec.matcher.is_empty() {
+                anyhow::bail!(
+                    "trigger {:?}: match must set tags_any and/or id_prefix",
+                    spec.name
+                );
             }
             triggers.push(Arc::new(Registered {
                 spec,
@@ -163,13 +181,30 @@ impl TriggerEngine {
             }
             let reg = Arc::clone(reg);
             let event = event.to_string();
-            let id = id.to_string();
-            std::thread::spawn(move || run_one(&reg, &event, &id));
+            let envs = vec![("ECPHORY_TRIGGER_EPISODE_ID".to_string(), id.to_string())];
+            std::thread::spawn(move || run_one(&reg, &event, envs));
+        }
+    }
+
+    /// Store-wide events (no episode; matcher does not apply). Explicit
+    /// subscription only — store events are never in the default set.
+    pub fn fire_store(&self, event: &str, dir: &std::path::Path) {
+        for reg in &self.triggers {
+            if !reg.spec.events.iter().any(|e| e == event) {
+                continue;
+            }
+            let reg = Arc::clone(reg);
+            let event = event.to_string();
+            let envs = vec![(
+                "ECPHORY_TRIGGER_EXPORT_DIR".to_string(),
+                dir.to_string_lossy().into_owned(),
+            )];
+            std::thread::spawn(move || run_one(&reg, &event, envs));
         }
     }
 }
 
-fn run_one(reg: &Registered, event: &str, id: &str) {
+fn run_one(reg: &Registered, event: &str, envs: Vec<(String, String)>) {
     // Serialize runs of the same trigger; a poisoned lock just means an
     // earlier run panicked — still safe to proceed.
     let _guard = reg.running.lock().unwrap_or_else(|p| p.into_inner());
@@ -180,7 +215,7 @@ fn run_one(reg: &Registered, event: &str, id: &str) {
         .args(&reg.spec.run[1..])
         .env("ECPHORY_TRIGGER_NAME", name)
         .env("ECPHORY_TRIGGER_EVENT", event)
-        .env("ECPHORY_TRIGGER_EPISODE_ID", id)
+        .envs(envs)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -208,15 +243,9 @@ fn run_one(reg: &Registered, event: &str, id: &str) {
                     })
                     .unwrap_or_default();
                 if status.success() {
-                    tracing::info!(
-                        "trigger {name}: ok ({event} {id}) in {:?}",
-                        started.elapsed()
-                    );
+                    tracing::info!("trigger {name}: ok ({event}) in {:?}", started.elapsed());
                 } else {
-                    tracing::warn!(
-                        "trigger {name}: exit {status} ({event} {id}): {}",
-                        stderr.trim()
-                    );
+                    tracing::warn!("trigger {name}: exit {status} ({event}): {}", stderr.trim());
                 }
                 return;
             }
@@ -225,7 +254,7 @@ fn run_one(reg: &Registered, event: &str, id: &str) {
                     let _ = child.kill();
                     let _ = child.wait();
                     tracing::warn!(
-                        "trigger {name}: killed after {}s timeout ({event} {id})",
+                        "trigger {name}: killed after {}s timeout ({event})",
                         reg.spec.timeout_seconds
                     );
                     return;
@@ -233,7 +262,7 @@ fn run_one(reg: &Registered, event: &str, id: &str) {
                 std::thread::sleep(Duration::from_millis(200));
             }
             Err(e) => {
-                tracing::warn!("trigger {name}: wait failed ({event} {id}): {e}");
+                tracing::warn!("trigger {name}: wait failed ({event}): {e}");
                 return;
             }
         }
@@ -304,5 +333,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(marker.exists(), "trigger command did not run");
+    }
+
+    #[test]
+    fn export_only_trigger_needs_no_matcher() {
+        // Store-wide events have no episode to match, so the matcher
+        // requirement doesn't apply.
+        spec(r#"{"triggers": [{"name": "sync", "run": ["/bin/true"], "events": ["export"]}]}"#)
+            .unwrap();
+        // But mixing in an episode event without a matcher is still rejected.
+        let err = spec(
+            r#"{"triggers": [{"name": "t", "run": ["/bin/true"], "events": ["export", "update"]}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("match must set"));
+    }
+
+    #[test]
+    fn fire_store_runs_export_subscribers_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_marker = dir.path().join("synced");
+        let episode_marker = dir.path().join("episode");
+        let engine = spec(&format!(
+            r#"{{"triggers": [
+                {{"name": "sync", "run": ["/usr/bin/touch", {sync_marker:?}], "events": ["export"]}},
+                {{"name": "render", "run": ["/usr/bin/touch", {episode_marker:?}], "match": {{"tags_any": ["hit"]}}}}
+            ]}}"#
+        ))
+        .unwrap();
+
+        // Episode events don't reach export-only triggers (empty matcher
+        // never matches), and fire_store doesn't reach episode triggers.
+        engine.fire("update", "id1", &["hit".into()]);
+        engine.fire_store("export", dir.path());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(sync_marker.exists() && episode_marker.exists()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(sync_marker.exists(), "export trigger did not run");
+        assert!(episode_marker.exists(), "episode trigger did not run");
     }
 }

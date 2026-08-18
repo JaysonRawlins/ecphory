@@ -157,6 +157,52 @@ pub fn git_commit(dir: &Path, message: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Push the mirror to its first configured remote, if any. No remote →
+/// Ok(false): the mirror stays a local cold tier until the operator adds
+/// one, and adding one IS the opt-in (`git remote add` is the whole setup).
+/// `HEAD` so it works whatever the local branch is named, with or without
+/// an upstream configured.
+pub fn git_push(dir: &Path) -> Result<bool> {
+    let git = |args: &[&str]| -> Result<std::process::Output> {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map_err(|e| Error::Storage(format!("git {:?}: {e}", args.first())))
+    };
+
+    let remotes = git(&["remote"])?;
+    if !remotes.status.success() {
+        return Err(Error::Storage(format!(
+            "git remote failed: {}",
+            String::from_utf8_lossy(&remotes.stderr)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&remotes.stdout);
+    let Some(remote) = stdout.lines().map(str::trim).find(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+
+    let push = git(&["push", "-q", remote, "HEAD"])?;
+    if !push.status.success() {
+        return Err(Error::Storage(format!(
+            "git push to {remote} failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        )));
+    }
+    Ok(true)
+}
+
+/// ECPHORY_EXPORT_PUSH gates the automatic post-export push (default on —
+/// a remote on the mirror already expresses the operator's intent).
+pub fn push_enabled() -> bool {
+    !matches!(
+        std::env::var("ECPHORY_EXPORT_PUSH").as_deref(),
+        Ok("false") | Ok("0") | Ok("off")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +255,47 @@ mod tests {
         write_mirror(std::slice::from_ref(&ep), dir.path()).unwrap();
         assert!(git_commit(dir.path(), "first").unwrap());
         assert!(!git_commit(dir.path(), "second").unwrap()); // nothing new
+    }
+
+    #[test]
+    fn git_push_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let mirror = root.path().join("mirror");
+        let bare = root.path().join("offsite.git");
+        std::fs::create_dir_all(&mirror).unwrap();
+
+        let ep = sample();
+        write_mirror(std::slice::from_ref(&ep), &mirror).unwrap();
+        assert!(git_commit(&mirror, "first").unwrap());
+
+        // No remote yet: push is a clean no-op, not an error.
+        assert!(!git_push(&mirror).unwrap());
+
+        let sh = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            out
+        };
+        sh(root.path(), &["init", "-q", "--bare", "offsite.git"]);
+        sh(
+            &mirror,
+            &["remote", "add", "origin", bare.to_str().unwrap()],
+        );
+
+        assert!(git_push(&mirror).unwrap());
+        let log = sh(&bare, &["log", "--oneline"]);
+        assert!(String::from_utf8_lossy(&log.stdout).contains("first"));
+    }
+
+    #[test]
+    fn push_enabled_env_gate() {
+        // Only asserts the default path (env unset in the test runner):
+        // mutating the process env here would race parallel tests.
+        assert!(push_enabled());
     }
 }

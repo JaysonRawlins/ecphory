@@ -32,19 +32,21 @@ Set `ECPHORY_TRIGGERS_FILE` to the path of a JSON file:
 | Field | Meaning |
 |---|---|
 | `name` | Label used in logs. |
-| `events` | Which write events fire it: `insert`, `update`, `demote`, `restore`, `restore_version`. Omit for the default set (`update`, `restore`, `restore_version`) — the three that change an existing episode's content. |
+| `events` | Which events fire it. Episode events: `insert`, `update`, `demote`, `restore`, `restore_version`; store-wide events: `export` (after a committed mirror export — see [backups](backups.md)). Omit for the default set (`update`, `restore`, `restore_version`) — the three that change an existing episode's content. Store events are never in the default set. |
 | `match.tags_any` | Fires when the episode carries any of these tags. |
 | `match.id_prefix` | Fires when the episode id starts with this prefix. |
 | `run` | argv — absolute program path plus args. |
 | `timeout_seconds` | Kill the command after this long (default 60). |
 
-A trigger must match on *something*: an empty `match` is a config error, not
-match-all — a command running on every write in the store is never what anyone
-meant. Unknown event names and relative program paths are also rejected at
-load.
+A trigger on episode events must match on *something*: an empty `match` is a
+config error, not match-all — a command running on every write in the store
+is never what anyone meant. Store-wide events carry no episode, so a trigger
+subscribed only to those needs no matcher. Unknown event names and relative
+program paths are also rejected at load.
 
-The command receives `ECPHORY_TRIGGER_NAME`, `ECPHORY_TRIGGER_EVENT`, and
-`ECPHORY_TRIGGER_EPISODE_ID` in its environment.
+The command receives `ECPHORY_TRIGGER_NAME` and `ECPHORY_TRIGGER_EVENT` in
+its environment, plus `ECPHORY_TRIGGER_EPISODE_ID` on episode events or
+`ECPHORY_TRIGGER_EXPORT_DIR` on `export`.
 
 ## Semantics
 

@@ -163,6 +163,12 @@ impl Ecphory {
         self.triggers = Some(std::sync::Arc::new(engine));
     }
 
+    /// Handle for firing store-wide trigger events (e.g. `export`) from
+    /// callers that operate outside episode writes.
+    pub fn triggers_engine(&self) -> Option<std::sync::Arc<crate::triggers::TriggerEngine>> {
+        self.triggers.clone()
+    }
+
     pub fn insert(&mut self, ep: &Episode) -> Result<()> {
         self.store.insert(ep)?;
         self.index.upsert(ep)?;

@@ -488,8 +488,22 @@ fn main() -> anyhow::Result<()> {
             } else {
                 false
             };
+            let pushed = if committed && export::push_enabled() {
+                match export::git_push(&dir) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("push failed: {e}");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if committed && let Some(engine) = svc.triggers_engine() {
+                engine.fire_store("export", &dir);
+            }
             println!(
-                "exported {} episodes: {} written, {} unchanged, committed={committed}",
+                "exported {} episodes: {} written, {} unchanged, committed={committed} pushed={pushed}",
                 episodes.len(),
                 outcome.written,
                 outcome.unchanged
