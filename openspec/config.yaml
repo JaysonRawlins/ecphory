@@ -1,0 +1,6 @@
+schema: spec-driven
+
+context: |
+  Rust, single-binary (redb + tantivy), MCP + REST + CLI. Distribution is a
+  first-class goal: portable binary, no runtime deps, no LLM in the write path.
+  We use conventional commits (release-plz keys releases off them).
