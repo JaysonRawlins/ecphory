@@ -26,6 +26,9 @@ pub struct Ecphory {
     store: Store,
     index: SearchIndex,
     recording: bool,
+    /// Post-write triggers (ECPHORY_TRIGGERS_FILE). Loaded at open so every
+    /// entry point — MCP, HTTP, CLI — fires them; no per-caller wiring.
+    triggers: Option<std::sync::Arc<crate::triggers::TriggerEngine>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -127,17 +130,45 @@ impl Ecphory {
             tracing::warn!("recorder prune failed: {e}");
         }
 
+        // A malformed triggers file disables the feature loudly rather than
+        // failing open: memory availability outranks a derived artifact, and
+        // a crash-looping launchd service would take every agent down with it.
+        let triggers = match crate::triggers::TriggerEngine::from_env() {
+            Ok(engine) => engine.map(std::sync::Arc::new),
+            Err(e) => {
+                tracing::error!("triggers DISABLED: {e}");
+                None
+            }
+        };
+
         Ok(Self {
             store,
             index,
             recording,
+            triggers,
         })
+    }
+
+    /// Never fails the write that fired it — triggers are observers.
+    fn fire_trigger(&self, event: &'static str, ep: &Episode) {
+        if let Some(engine) = &self.triggers {
+            engine.fire(event, &ep.id.to_string(), &ep.tags);
+        }
+    }
+
+    /// Inject an engine directly — tests only, so they need no env vars
+    /// (process-global and racy under the parallel test runner).
+    #[cfg(test)]
+    pub(crate) fn set_triggers_for_test(&mut self, engine: crate::triggers::TriggerEngine) {
+        self.triggers = Some(std::sync::Arc::new(engine));
     }
 
     pub fn insert(&mut self, ep: &Episode) -> Result<()> {
         self.store.insert(ep)?;
         self.index.upsert(ep)?;
-        self.index.commit()
+        self.index.commit()?;
+        self.fire_trigger("insert", ep);
+        Ok(())
     }
 
     /// Bulk insert with one index commit at the end. Returns count inserted
@@ -194,6 +225,7 @@ impl Ecphory {
         let ep = self.store.update(id, params)?;
         self.index.upsert(&ep)?;
         self.index.commit()?;
+        self.fire_trigger("update", &ep);
         Ok(ep)
     }
 
@@ -201,6 +233,7 @@ impl Ecphory {
         let ep = self.store.demote(id)?;
         self.index.upsert(&ep)?;
         self.index.commit()?;
+        self.fire_trigger("demote", &ep);
         Ok(ep)
     }
 
@@ -208,6 +241,7 @@ impl Ecphory {
         let ep = self.store.restore(id)?;
         self.index.upsert(&ep)?;
         self.index.commit()?;
+        self.fire_trigger("restore", &ep);
         Ok(ep)
     }
 
@@ -215,6 +249,7 @@ impl Ecphory {
         let ep = self.store.restore_version(id, version_id)?;
         self.index.upsert(&ep)?;
         self.index.commit()?;
+        self.fire_trigger("restore_version", &ep);
         Ok(ep)
     }
 
@@ -1634,6 +1669,39 @@ mod tests {
             svc.purge_manifest(&e.id.to_string()),
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn update_fires_matching_trigger() {
+        let (mut svc, dir) = temp();
+        let marker = dir.path().join("trigger-fired");
+        let engine = crate::triggers::TriggerEngine::from_json(&format!(
+            r#"{{"triggers": [{{"name": "render", "run": ["/usr/bin/touch", {marker:?}], "match": {{"tags_any": ["rendered-artifact"]}}}}]}}"#
+        ))
+        .unwrap();
+        svc.set_triggers_for_test(engine);
+
+        let mut e = ep("canonical source for a rendered file");
+        e.tags = vec!["rendered-artifact".into()];
+        svc.insert(&e).unwrap();
+        // insert is not in the default event set — marker must not exist yet
+        // (fire is async; the update below gives it ample time to be wrong).
+        let updated = svc
+            .update(
+                &e.id.to_string(),
+                UpdateParams {
+                    content: Some("edited".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.content, "edited");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "update did not fire the trigger");
     }
 
     #[test]
