@@ -11,4 +11,4 @@
 
 ## 3. Verify (reference deployment)
 
-- [ ] 3.1 Private mirror remote configured; scheduled export pushes (serve log `pushed=true`; remote shows the commit).
+- [x] 3.1 Private mirror remote configured; scheduled export pushes (serve log `pushed=true`; remote shows the commit). Verified 2026-08-18: boot export pushed 9b74ef3 to JaysonRawlins/ecphory-mirror (private).
