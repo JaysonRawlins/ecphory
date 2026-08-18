@@ -515,6 +515,7 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
         {
             {
                 let export_svc = state.svc.clone();
+                let trig_engine = export_svc.lock().expect("service lock").triggers_engine();
                 let interval = parse_interval(
                     &std::env::var("ECPHORY_EXPORT_INTERVAL").unwrap_or_default(),
                 )
@@ -536,14 +537,33 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
                             let outcome = crate::export::write_mirror(&episodes, &path)?;
                             let committed =
                                 crate::export::git_commit(&path, "ecphory scheduled export")?;
-                            Ok::<_, crate::error::Error>((outcome, committed, episodes.len()))
+                            // Offsite tier: push only when a commit landed and a
+                            // remote exists. A push failure is a warning, never a
+                            // failed export — the local mirror is already durable.
+                            let pushed = if committed && crate::export::push_enabled() {
+                                match crate::export::git_push(&path) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        tracing::warn!("scheduled export: push failed: {e}");
+                                        false
+                                    }
+                                }
+                            } else {
+                                false
+                            };
+                            Ok::<_, crate::error::Error>((outcome, committed, pushed, episodes.len(), path))
                         })
                         .await;
                         match result {
-                            Ok(Ok((outcome, committed, total))) => tracing::info!(
-                                "scheduled export: {total} episodes, {} written, {} unchanged, committed={committed}",
-                                outcome.written, outcome.unchanged
-                            ),
+                            Ok(Ok((outcome, committed, pushed, total, path))) => {
+                                tracing::info!(
+                                    "scheduled export: {total} episodes, {} written, {} unchanged, committed={committed} pushed={pushed}",
+                                    outcome.written, outcome.unchanged
+                                );
+                                if committed && let Some(engine) = &trig_engine {
+                                    engine.fire_store("export", &path);
+                                }
+                            }
                             Ok(Err(e)) => tracing::warn!("scheduled export failed: {e}"),
                             Err(e) => tracing::warn!("scheduled export task panicked: {e}"),
                         }
