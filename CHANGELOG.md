@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- hidden groups: `ECPHORY_HIDDEN_GROUPS` lists groups an unscoped search skips; naming the group in `group_id` opts back in; `/status` reports the set (#22)
 - atomic archived-version rollback through MCP, REST, and CLI
 
 ### Fixed

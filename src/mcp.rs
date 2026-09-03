@@ -76,6 +76,9 @@ pub struct SearchRequest {
     /// Maximum results (default 10).
     #[serde(default)]
     pub max_results: usize,
+    /// Restrict to one group. Groups the operator marked hidden
+    /// (ECPHORY_HIDDEN_GROUPS) are skipped when this is empty and returned
+    /// normally when named here.
     #[serde(default)]
     pub group_id: String,
     #[serde(default)]
