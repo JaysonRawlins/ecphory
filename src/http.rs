@@ -171,6 +171,8 @@ struct SearchQuery {
     query: String,
     #[serde(default)]
     max_results: usize,
+    /// Hidden groups (ECPHORY_HIDDEN_GROUPS) are skipped when unset and
+    /// returned normally when named.
     #[serde(default)]
     group_id: Option<String>,
     #[serde(default)]
@@ -577,6 +579,7 @@ async fn status(State(state): State<Shared>) -> Response {
         "status": "operational",
         "version": env!("CARGO_PKG_VERSION"),
         "episodes": count,
+        "hidden_groups": svc.hidden_groups(),
     }))
     .into_response()
 }

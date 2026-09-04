@@ -56,6 +56,8 @@ enum Command {
         limit: usize,
         #[arg(long)]
         include_deleted: bool,
+        /// Restrict to one group. Hidden groups (ECPHORY_HIDDEN_GROUPS) are
+        /// skipped unless named here.
         #[arg(long)]
         group: Option<String>,
         #[arg(long)]

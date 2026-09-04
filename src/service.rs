@@ -29,6 +29,12 @@ pub struct Ecphory {
     /// Post-write triggers (ECPHORY_TRIGGERS_FILE). Loaded at open so every
     /// entry point — MCP, HTTP, CLI — fires them; no per-caller wiring.
     triggers: Option<std::sync::Arc<crate::triggers::TriggerEngine>>,
+    /// Groups an unscoped search skips (ECPHORY_HIDDEN_GROUPS). Naming the
+    /// group in SearchOptions opts back in: hidden is "ask for it", never
+    /// "invisible". Exists because a group used as a structured store (todos)
+    /// is short, imperative and keyword-dense, so it outranks real memories
+    /// on queries it has nothing to do with.
+    hidden_groups: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -92,6 +98,18 @@ pub struct HealReplayReport {
     pub entries: Vec<HealReplayEntry>,
 }
 
+/// ECPHORY_HIDDEN_GROUPS: comma-separated, trimmed, empties dropped. Read
+/// once at open so MCP, REST and CLI all agree on what is hidden.
+fn hidden_groups_from_env() -> Vec<String> {
+    std::env::var("ECPHORY_HIDDEN_GROUPS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 impl Ecphory {
     /// The index lives beside the database file: <db_dir>/index/.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
@@ -146,7 +164,21 @@ impl Ecphory {
             index,
             recording,
             triggers,
+            hidden_groups: hidden_groups_from_env(),
         })
+    }
+
+    /// Replace the hidden-group set — tests only, so they need no env vars
+    /// (process-global and racy under the parallel test runner).
+    #[cfg(test)]
+    pub(crate) fn with_hidden_groups(mut self, groups: Vec<String>) -> Self {
+        self.hidden_groups = groups;
+        self
+    }
+
+    /// The groups an unscoped search skips.
+    pub fn hidden_groups(&self) -> &[String] {
+        &self.hidden_groups
     }
 
     /// Never fails the write that fired it — triggers are observers.
@@ -361,6 +393,11 @@ impl Ecphory {
                 continue;
             }
             if opts.group_id.as_ref().is_some_and(|g| &ep.group_id != g) {
+                continue;
+            }
+            // Hidden groups drop out of UNSCOPED searches only; naming the
+            // group above is the opt-in.
+            if opts.group_id.is_none() && self.hidden_groups.iter().any(|g| g == &ep.group_id) {
                 continue;
             }
             if opts.source.as_ref().is_some_and(|s| &ep.source != s) {
@@ -899,6 +936,46 @@ mod tests {
                 .results
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn hidden_group_excluded_unless_named() {
+        let (svc, _d) = temp();
+        let mut svc = svc.with_hidden_groups(vec!["todos".into()]);
+        let mut visible = ep("contact the electrician about the panel");
+        visible.group_id = "default".into();
+        let mut hidden = ep("contact the electrician about the panel");
+        hidden.group_id = "todos".into();
+        svc.insert(&visible).unwrap();
+        svc.insert(&hidden).unwrap();
+
+        // Unscoped: the hidden group must not appear, however well it scores.
+        let out = svc
+            .search("contact electrician", &SearchOptions::default())
+            .unwrap();
+        let ids: Vec<_> = out.results.iter().map(|r| r.episode.id).collect();
+        assert_eq!(
+            ids,
+            vec![visible.id],
+            "unscoped search leaked a hidden group"
+        );
+
+        // Naming the group opts back in.
+        let out = svc
+            .search(
+                "contact electrician",
+                &SearchOptions {
+                    group_id: Some("todos".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ids: Vec<_> = out.results.iter().map(|r| r.episode.id).collect();
+        assert_eq!(
+            ids,
+            vec![hidden.id],
+            "scoped search must return the hidden group"
         );
     }
 
