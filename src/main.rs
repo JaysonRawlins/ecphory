@@ -1,6 +1,7 @@
 mod error;
 mod eval;
 mod export;
+mod harness;
 mod http;
 mod import;
 mod index;
@@ -127,6 +128,8 @@ enum Command {
     Reindex,
     /// Store status
     Status,
+    /// Verify that ecphory's context actually reaches each installed agent harness
+    Doctor,
     /// Flight-recorder aggregates: query counts, zero-hit rate, latency percentiles
     Stats,
     /// Recent recorded searches, newest first
@@ -253,6 +256,33 @@ fn main() -> anyhow::Result<()> {
         if !ok {
             std::process::exit(1);
         }
+        return Ok(());
+    }
+
+    // Doctor reads harness configuration from disk and must never open the
+    // store: redb's lock is process-exclusive, and the daemon is normally
+    // running at exactly the moment an operator wants to run doctor.
+    if matches!(cli.command, Command::Doctor) {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow::anyhow!("HOME is not set"))?;
+        let reports = harness::static_report(&home);
+        if reports.is_empty() {
+            println!(
+                "no supported agent harness detected under {}",
+                home.display()
+            );
+            return Ok(());
+        }
+        for r in &reports {
+            println!("{r}");
+        }
+        println!();
+        println!(
+            "Static inspection cannot prove delivery. Four of the five known \
+silent-failure modes pass every static check, so a config that parses is not \
+evidence that text reached the model."
+        );
         return Ok(());
     }
 
@@ -600,6 +630,7 @@ fn main() -> anyhow::Result<()> {
             mcp::serve_http(svc, port)?;
         }
         Command::Eval { .. } => unreachable!("handled before store open"),
+        Command::Doctor => unreachable!("handled before store open"),
     }
     Ok(())
 }
