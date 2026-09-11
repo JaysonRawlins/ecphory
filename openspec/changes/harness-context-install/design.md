@@ -92,6 +92,36 @@ does mean `--live` leaves a trace in harness history. Harmless for a random
 token; worth documenting so nobody mistakes it for an unrestored canary when
 grepping.
 
+## Evidence correction (2026-09-11)
+
+Commit 40a4970's message claims the snippet change turned a copilot `miss` into
+a `hit`. That comparison was CONTAMINATED and the claim is too strong.
+
+Copilot's config already held an `Ecphory` server pointing at the LIVE daemon,
+so the "before" arm ran against a different server, a different binary and a
+store 8 episodes larger than the "after" arm. Re-run cleanly — same store, same
+server, only the binary differing:
+
+    before (full bodies)  33.6 KB, spilled to a temp file, ~83s, ANSWER FOUND
+    after  (snippets)     inline, ~26s, answer found
+
+So the defensible claim is: the payload reliably exceeds copilot's inline
+tool-output limit and forces a spill-and-grep detour costing roughly 3x wall
+time. It SOMETIMES recovers and sometimes rates a miss; the observed miss came
+from the contaminated arm. The fix is still right — it removes the detour — but
+"miss becomes hit" was not established.
+
+Two lessons, both now baked into install's design:
+- A pre-existing server entry silently wins. That is what broke the isolation
+  here, and it is exactly what an installer that ADDS a sibling entry would
+  inflict on a user: two ecphory servers and a non-deterministic choice between
+  them. Hence install STAMPS an existing entry and REFUSES on a collision.
+- The spike leaked 11 searches and one false `miss` into the live recorder. No
+  episode was mutated (`corrections: 0`), but the miss is permanent — ratings
+  are immutable by design. It is also a real specimen of the contamination the
+  client stamp exists to make visible: rating 01a090ba-a9d8, search
+  01a090ba-90a2, client `None` because the stamp did not exist yet.
+
 ## Open questions
 
 - codex hook stdout injection: untested (trust prompt is interactive; the bypass

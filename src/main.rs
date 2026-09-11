@@ -5,6 +5,7 @@ mod harness;
 mod http;
 mod import;
 mod index;
+mod install;
 mod mcp;
 mod model;
 mod recorder;
@@ -128,6 +129,12 @@ enum Command {
     Reindex,
     /// Store status
     Status,
+    /// Wire each installed harness to this store. Dry-run unless --apply.
+    Install {
+        /// Write the planned changes. Without it, install only prints the plan.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Verify that ecphory's context actually reaches each installed agent harness
     Doctor {
         /// Prove delivery by invoking each harness with a single-use canary.
@@ -268,6 +275,29 @@ fn main() -> anyhow::Result<()> {
     // Doctor reads harness configuration from disk and must never open the
     // store: redb's lock is process-exclusive, and the daemon is normally
     // running at exactly the moment an operator wants to run doctor.
+    if let Command::Install { apply } = cli.command {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow::anyhow!("HOME is not set"))?;
+        let plans = install::plan(&home);
+        if plans.is_empty() {
+            println!(
+                "no supported agent harness detected under {}",
+                home.display()
+            );
+            return Ok(());
+        }
+        for p in &plans {
+            println!("{}", p.render());
+        }
+        println!();
+        if apply {
+            anyhow::bail!("--apply is not implemented yet; the plan above was not written");
+        }
+        println!("Dry run: nothing was written. Re-run with --apply to make these changes.");
+        return Ok(());
+    }
+
     if let Command::Doctor { live } = cli.command {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
@@ -643,6 +673,7 @@ evidence that text reached the model. Run `ecphory doctor --live` to settle it."
         }
         Command::Eval { .. } => unreachable!("handled before store open"),
         Command::Doctor { .. } => unreachable!("handled before store open"),
+        Command::Install { .. } => unreachable!("handled before store open"),
     }
     Ok(())
 }
