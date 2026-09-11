@@ -135,6 +135,12 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Remove ecphory's client stamp from each harness's MCP config
+    Uninstall {
+        /// Write the changes. Without it, only the plan is printed.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Verify that ecphory's context actually reaches each installed agent harness
     Doctor {
         /// Prove delivery by invoking each harness with a single-use canary.
@@ -291,10 +297,55 @@ fn main() -> anyhow::Result<()> {
             println!("{}", p.render());
         }
         println!();
-        if apply {
-            anyhow::bail!("--apply is not implemented yet; the plan above was not written");
+        if !apply {
+            println!("Dry run: nothing was written. Re-run with --apply to make these changes.");
+            return Ok(());
         }
-        println!("Dry run: nothing was written. Re-run with --apply to make these changes.");
+        let mut refused = false;
+        for (h, outcome) in install::apply(&plans) {
+            match outcome {
+                install::Outcome::Changed(m) => println!("{:<9} CHANGED   {m}", h.name()),
+                install::Outcome::Unchanged(m) => println!("{:<9} no change {m}", h.name()),
+                install::Outcome::Refused(m) => {
+                    refused = true;
+                    println!("{:<9} REFUSED   {m}", h.name());
+                }
+            }
+        }
+        if refused {
+            println!();
+            println!("One or more harnesses were left alone. Nothing partial was written.");
+        }
+        return Ok(());
+    }
+
+    if let Command::Uninstall { apply } = cli.command {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow::anyhow!("HOME is not set"))?;
+        let plans = install::uninstall_plan(&home);
+        if plans.is_empty() {
+            println!(
+                "no supported agent harness detected under {}",
+                home.display()
+            );
+            return Ok(());
+        }
+        for p in &plans {
+            println!("{}", p.render());
+        }
+        println!();
+        if !apply {
+            println!("Dry run: nothing was written. Re-run with --apply to remove the stamps.");
+            return Ok(());
+        }
+        for (h, outcome) in install::apply(&plans) {
+            match outcome {
+                install::Outcome::Changed(m) => println!("{:<9} CHANGED   {m}", h.name()),
+                install::Outcome::Unchanged(m) => println!("{:<9} no change {m}", h.name()),
+                install::Outcome::Refused(m) => println!("{:<9} REFUSED   {m}", h.name()),
+            }
+        }
         return Ok(());
     }
 
@@ -674,6 +725,7 @@ evidence that text reached the model. Run `ecphory doctor --live` to settle it."
         Command::Eval { .. } => unreachable!("handled before store open"),
         Command::Doctor { .. } => unreachable!("handled before store open"),
         Command::Install { .. } => unreachable!("handled before store open"),
+        Command::Uninstall { .. } => unreachable!("handled before store open"),
     }
     Ok(())
 }

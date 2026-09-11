@@ -111,6 +111,53 @@ you. Binaries are ad-hoc signed; notarization is future work.
 
 See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
 
+## Wiring your agent harness
+
+```sh
+ecphory install            # print the plan; writes nothing
+ecphory install --apply    # make the changes (backs up every file it touches)
+ecphory uninstall --apply  # put them back
+ecphory doctor             # what is configured
+ecphory doctor --live      # what actually reaches the model
+```
+
+`install` finds the ecphory MCP server each harness already has and stamps it
+with the harness name, so the flight recorder can tell which agent issued a
+search or a rating. It edits the URL in place by text replacement rather than
+reserializing your config, and refuses rather than guessing when a harness has
+more than one ecphory server configured.
+
+`doctor` reports `DELIVERED` only after `--live` has round-tripped a single-use
+canary through a real session. Static inspection never claims delivery, because
+most of the ways this breaks look perfectly fine in a config file.
+
+### Supported harnesses
+
+Claude Code, Codex CLI, OpenCode, and GitHub Copilot CLI. All four were
+measured — not inferred from docs — searching the store unprompted from an
+ordinary task, and retrieving the same planted fact.
+
+**Use it elsewhere at your own risk.** This is not modesty about other tools; it
+is that the failure modes here are SILENT and harness-specific, and we only know
+where these four break:
+
+- Copilot CLI has an inline tool-output limit. Search responses that exceed it
+  get spilled to a temp file, which sends the agent on a grep detour costing
+  roughly 3x wall time, and sometimes ends with a real hit rated a miss. This is
+  why search returns truncated snippets with full text on request.
+- Codex CLI requires approval for MCP tool calls. A non-interactive session with
+  approvals disabled has its memory lookups denied — the agent tries, and gets
+  nothing.
+- Claude Code defers MCP tool schemas, so a tool *description* is not in context
+  until the agent fetches it. Guidance placed there cannot prompt a lookup that
+  has not already happened.
+- MCP server `instructions` are honoured by Claude Code, ignored by Codex, and
+  opt-in behind a flag for Copilot.
+
+An unsupported harness may work fine. It may also rate every search a miss
+because it cannot read the response, and nothing will tell you. Run
+`ecphory doctor --live` and believe that rather than this list.
+
 ## Status
 
 v0.2: canonical store, tantivy BM25 search with write-time phrase boosting,

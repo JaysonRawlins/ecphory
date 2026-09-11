@@ -235,3 +235,149 @@ pub fn plan(home: &Path) -> Vec<Plan> {
         })
         .collect()
 }
+
+/// Strip an ecphory client stamp back out of a URL, restoring what was there
+/// before. Returns None when there is no stamp to remove.
+fn unstamped(url: &str) -> Option<String> {
+    let (base, q) = url.split_once('?')?;
+    let all: Vec<&str> = q.split('&').collect();
+    let kept: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|kv| !kv.starts_with("client="))
+        .collect();
+    if kept.len() == all.len() {
+        return None;
+    }
+    Some(if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    })
+}
+
+pub enum Outcome {
+    Changed(String),
+    Unchanged(String),
+    Refused(String),
+}
+
+/// Replace one URL with another by SURGICAL TEXT EDIT.
+///
+/// Never a parse-and-reserialize: a JSON or TOML round-trip rewrites the whole
+/// file (one measured case took opencode.json from 3952 to 4455 bytes), turning
+/// "add a query parameter" into an unreviewable diff of a config the user
+/// maintains by hand. Comments and key order in TOML would not survive it at all.
+///
+/// Refuses when the old URL appears more than once: the edit target is then
+/// ambiguous, and guessing wrong silently repoints some other server at ecphory.
+fn edit_url(target: &Path, from: &str, to: &str) -> Outcome {
+    let Ok(text) = std::fs::read_to_string(target) else {
+        return Outcome::Refused(format!("cannot read {}", target.display()));
+    };
+    match text.matches(from).count() {
+        0 => return Outcome::Refused(format!("`{from}` not found in {}", target.display())),
+        1 => {}
+        n => {
+            return Outcome::Refused(format!(
+                "`{from}` appears {n} times in {} -- the edit is ambiguous and more than one \
+                 server may share it; nothing written",
+                target.display()
+            ));
+        }
+    }
+
+    // Back up before touching anything; refuse if the backup cannot be made,
+    // rather than making a change that cannot be undone.
+    let backup = target.with_extension(format!(
+        "{}.ecphory-bak-{}",
+        target.extension().and_then(|e| e.to_str()).unwrap_or("cfg"),
+        chrono::Utc::now().format("%Y%m%d%H%M%S")
+    ));
+    if std::fs::write(&backup, &text).is_err() {
+        return Outcome::Refused(format!(
+            "cannot write a backup at {}; refusing to modify {}",
+            backup.display(),
+            target.display()
+        ));
+    }
+
+    match std::fs::write(target, text.replacen(from, to, 1)) {
+        Ok(()) => Outcome::Changed(format!(
+            "{} updated (backup {})",
+            target.display(),
+            backup.display()
+        )),
+        Err(e) => Outcome::Refused(format!("write failed for {}: {e}", target.display())),
+    }
+}
+
+/// Apply the stamping half of a plan.
+pub fn apply(plans: &[Plan]) -> Vec<(Harness, Outcome)> {
+    plans
+        .iter()
+        .map(|p| {
+            let outcome = match &p.action {
+                Action::Stamp {
+                    target, from, to, ..
+                } => edit_url(target, from, to),
+                Action::Ok { server, .. } => {
+                    Outcome::Unchanged(format!("`{server}` already stamped"))
+                }
+                Action::Collision { servers } => Outcome::Refused(format!(
+                    "two or more ecphory servers ({}) -- remove the extra, then re-run",
+                    servers.join(", ")
+                )),
+                Action::Add { .. } => Outcome::Refused(
+                    "adding a new server is not implemented yet; configure the MCP server for \
+                     this harness by hand, then re-run to have it stamped"
+                        .into(),
+                ),
+                Action::NoConfig(p) => {
+                    Outcome::Unchanged(format!("no MCP config at {}", p.display()))
+                }
+            };
+            (p.harness, outcome)
+        })
+        .collect()
+}
+
+/// The reverse: find stamped ecphory servers and strip the stamp back out.
+pub fn uninstall_plan(home: &Path) -> Vec<Plan> {
+    Harness::ALL
+        .iter()
+        .filter(|h| h.is_present(home))
+        .map(|&harness| {
+            let (target, syntax) = mcp_config(harness, home);
+            let Ok(text) = std::fs::read_to_string(&target) else {
+                return Plan {
+                    harness,
+                    action: Action::NoConfig(target),
+                };
+            };
+            let found = match syntax {
+                Syntax::Json { key } => find_json(&text, key),
+                Syntax::Toml => find_toml(&text),
+            };
+            let action = match found.len() {
+                1 => match unstamped(&found[0].url) {
+                    Some(to) => Action::Stamp {
+                        target,
+                        server: found[0].name.clone(),
+                        from: found[0].url.clone(),
+                        to,
+                    },
+                    None => Action::Ok {
+                        server: found[0].name.clone(),
+                        client: "none".into(),
+                    },
+                },
+                0 => Action::NoConfig(target),
+                _ => Action::Collision {
+                    servers: found.into_iter().map(|f| f.name).collect(),
+                },
+            };
+            Plan { harness, action }
+        })
+        .collect()
+}
