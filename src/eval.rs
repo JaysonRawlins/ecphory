@@ -237,31 +237,62 @@ impl EvalClient {
         ))
     }
 
-    pub fn search_log(&self, limit: usize) -> Result<Vec<LoggedSearch>> {
+    /// Is a daemon answering on this base URL? Used to decide whether a
+    /// read-only view can go over HTTP instead of opening the store.
+    pub fn reachable(&self) -> bool {
         #[derive(Deserialize)]
-        struct Wrap {
-            searches: Vec<LoggedSearch>,
+        struct Status {
+            status: String,
         }
-        let w: Wrap = self.get_json(&format!("/api/v1/memory/search-log?limit={limit}"))?;
+        // `/status` alone 404s: the router mounts everything under the
+        // versioned prefix, so a bare probe would report "no daemon" against
+        // a perfectly healthy one.
+        self.get_json::<Status>("/api/v1/status")
+            .is_ok_and(|s| !s.status.is_empty())
+    }
+
+    // The log readers below are generic in the row type on purpose: `eval`
+    // deserializes its own narrow projections (only the fields the join
+    // needs), while the CLI log views want the canonical recorder entries.
+    // Same endpoint, same envelope, two views — so the shapes never drift
+    // apart into two copies of the fetch.
+
+    pub fn search_log<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Result<Vec<T>> {
+        #[derive(Deserialize)]
+        struct Wrap<T> {
+            searches: Vec<T>,
+        }
+        let w: Wrap<T> = self.get_json(&format!("/api/v1/memory/search-log?limit={limit}"))?;
         Ok(w.searches)
     }
 
-    pub fn access_log(&self, limit: usize) -> Result<Vec<LoggedAccess>> {
+    pub fn access_log<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Result<Vec<T>> {
         #[derive(Deserialize)]
-        struct Wrap {
-            accesses: Vec<LoggedAccess>,
+        struct Wrap<T> {
+            accesses: Vec<T>,
         }
-        let w: Wrap = self.get_json(&format!("/api/v1/memory/access-log?limit={limit}"))?;
+        let w: Wrap<T> = self.get_json(&format!("/api/v1/memory/access-log?limit={limit}"))?;
         Ok(w.accesses)
     }
 
-    pub fn rating_log(&self, limit: usize) -> Result<Vec<LoggedRating>> {
+    pub fn rating_log<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Result<Vec<T>> {
         #[derive(Deserialize)]
-        struct Wrap {
-            ratings: Vec<LoggedRating>,
+        struct Wrap<T> {
+            ratings: Vec<T>,
         }
-        let w: Wrap = self.get_json(&format!("/api/v1/memory/rating-log?limit={limit}"))?;
+        let w: Wrap<T> = self.get_json(&format!("/api/v1/memory/rating-log?limit={limit}"))?;
         Ok(w.ratings)
+    }
+
+    /// Heal resolutions. No `eval` projection exists for these — note this
+    /// is NOT `HealEntry`, which is the flatter heal-replay REPORT shape.
+    pub fn resolution_log<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Result<Vec<T>> {
+        #[derive(Deserialize)]
+        struct Wrap<T> {
+            resolutions: Vec<T>,
+        }
+        let w: Wrap<T> = self.get_json(&format!("/api/v1/memory/resolution-log?limit={limit}"))?;
+        Ok(w.resolutions)
     }
 
     /// Run the heal-replay pass daemon-side (it writes replay outcomes back
@@ -481,9 +512,9 @@ fn drop_bursts<T>(
 }
 
 pub fn run_from_log(client: &EvalClient, k: usize, window_secs: i64) -> Result<bool> {
-    let raw_searches = client.search_log(1000)?;
-    let raw_accesses = client.access_log(1000)?;
-    let ratings = client.rating_log(1000)?;
+    let raw_searches: Vec<LoggedSearch> = client.search_log(1000)?;
+    let raw_accesses: Vec<LoggedAccess> = client.access_log(1000)?;
+    let ratings: Vec<LoggedRating> = client.rating_log(1000)?;
 
     // Explicit ratings: the preferred signal — the consumer's own verdict
     // at the moment of use. Joined by id against the UNFILTERED tape (a

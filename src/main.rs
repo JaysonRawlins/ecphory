@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::model::{Episode, UpdateParams};
+use crate::recorder::{AccessLogEntry, RatingLogEntry, ResolutionLogEntry, SearchLogEntry};
 use crate::service::{Ecphory, PurgeManifest, SearchOptions};
 use crate::store::ListOptions;
 
@@ -28,6 +29,11 @@ struct Cli {
     /// that footgun corrupts stores when servers start from the wrong dir.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+
+    /// Daemon base URL for the commands that read over HTTP. Defaults to
+    /// $ECPHORY_URL, then http://127.0.0.1:3491.
+    #[arg(long, global = true)]
+    url: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -173,9 +179,6 @@ enum Command {
         /// still ranks within top k. Exits non-zero if any heal regressed.
         #[arg(long)]
         heals: bool,
-        /// Daemon base URL
-        #[arg(long, default_value = "http://127.0.0.1:3491")]
-        url: String,
         #[arg(long, default_value_t = 5)]
         k: usize,
         /// Exit non-zero if overall gold MRR falls below this (drift guard)
@@ -210,6 +213,147 @@ fn db_path(cli_flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Daemon base URL: --url, then $ECPHORY_URL, then loopback.
+fn daemon_url(cli_flag: Option<&str>) -> String {
+    if let Some(url) = cli_flag {
+        return url.to_string();
+    }
+    std::env::var("ECPHORY_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:3491".to_string())
+}
+
+fn auth_token() -> Option<String> {
+    std::env::var("ECPHORY_AUTH_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+}
+
+/// Where a read-only recorder view gets its rows.
+///
+/// redb's lock is process-exclusive, so a command that opens the store
+/// directly dies with "Database already open" for as long as `ecphory serve`
+/// is up — which, for a daemon, is always. These views ask the daemon first
+/// and fall back to the store only when nothing answers, so they work both
+/// alongside a running daemon and offline (which is why they are not
+/// HTTP-only like `eval`).
+enum LogReader {
+    Remote(eval::EvalClient),
+    Local(Box<Ecphory>),
+}
+
+impl LogReader {
+    fn open(cli: &Cli) -> anyhow::Result<Self> {
+        // An explicit --db names ONE specific store. Honour it: silently
+        // reading a different store over HTTP because some daemon happened
+        // to answer is a worse failure than the lock error itself.
+        if cli.db.is_none() {
+            let url = daemon_url(cli.url.as_deref());
+            let client = eval::EvalClient::new(url.clone(), auth_token());
+            if client.reachable() {
+                eprintln!("(reading from daemon {url})");
+                return Ok(Self::Remote(client));
+            }
+        }
+        let path = db_path(cli.db.clone())?;
+        eprintln!("(reading from store {})", path.display());
+        Ok(Self::Local(Box::new(Ecphory::open(path)?)))
+    }
+
+    fn searches(&self, limit: usize) -> anyhow::Result<Vec<SearchLogEntry>> {
+        Ok(match self {
+            Self::Remote(c) => c.search_log(limit)?,
+            Self::Local(svc) => svc.recent_searches(limit)?,
+        })
+    }
+
+    fn accesses(&self, limit: usize) -> anyhow::Result<Vec<AccessLogEntry>> {
+        Ok(match self {
+            Self::Remote(c) => c.access_log(limit)?,
+            Self::Local(svc) => svc.recent_accesses(limit)?,
+        })
+    }
+
+    fn ratings(&self, limit: usize) -> anyhow::Result<Vec<RatingLogEntry>> {
+        Ok(match self {
+            Self::Remote(c) => c.rating_log(limit)?,
+            Self::Local(svc) => svc.recent_ratings(limit)?,
+        })
+    }
+
+    fn resolutions(&self, limit: usize) -> anyhow::Result<Vec<ResolutionLogEntry>> {
+        Ok(match self {
+            Self::Remote(c) => c.resolution_log(limit)?,
+            Self::Local(svc) => svc.recent_resolutions(limit)?,
+        })
+    }
+}
+
+fn print_search_log(entries: &[SearchLogEntry]) {
+    for e in entries {
+        println!(
+            "{}  {:>7.2}ms  {:>3} hits  {:?}",
+            e.ts.format("%Y-%m-%d %H:%M:%S"),
+            e.latency_us as f64 / 1000.0,
+            e.result_count,
+            e.query
+        );
+    }
+}
+
+fn print_access_log(entries: &[AccessLogEntry]) {
+    for e in entries {
+        println!("{}  {}", e.ts.format("%Y-%m-%d %H:%M:%S"), e.episode_id);
+    }
+}
+
+fn print_ratings(entries: &[RatingLogEntry]) {
+    for e in entries {
+        println!(
+            "{}  {:<7}  search {}  used [{}]{}",
+            e.ts.format("%Y-%m-%d %H:%M:%S"),
+            format!("{:?}", e.rating).to_lowercase(),
+            &e.search_id[..8.min(e.search_id.len())],
+            e.used_episode_ids
+                .iter()
+                .map(|id| &id[..8.min(id.len())])
+                .collect::<Vec<_>>()
+                .join(", "),
+            e.note
+                .as_deref()
+                .map(|n| format!("  — {n}"))
+                .unwrap_or_default()
+        );
+    }
+}
+
+fn print_heals(entries: &[ResolutionLogEntry]) {
+    for r in entries {
+        let replay = match &r.last_replay {
+            None => "unreplayed".to_string(),
+            Some(o) if o.held => format!(
+                "held (rank {})",
+                o.rank.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+            ),
+            Some(_) => "REGRESSED".to_string(),
+        };
+        println!(
+            "{}  {:<20}  {:?} -> {}  validated {}{}",
+            r.ts.format("%Y-%m-%d %H:%M:%S"),
+            replay,
+            r.query,
+            &r.episode_id[..8.min(r.episode_id.len())],
+            r.validated_rank,
+            if r.displaced_used.is_empty() {
+                String::new()
+            } else {
+                format!("  displaced [{}]", r.displaced_used.join(", "))
+            }
+        );
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -226,16 +370,12 @@ fn main() -> anyhow::Result<()> {
         gold,
         from_log,
         heals,
-        url,
         k,
         min_mrr,
         window,
     } = &cli.command
     {
-        let token = std::env::var("ECPHORY_AUTH_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty());
-        let client = eval::EvalClient::new(url.clone(), token);
+        let client = eval::EvalClient::new(daemon_url(cli.url.as_deref()), auth_token());
         let mut ok = true;
         if let Some(gold_path) = gold {
             let pairs = eval::parse_gold(gold_path)?;
@@ -252,6 +392,27 @@ fn main() -> anyhow::Result<()> {
         }
         if !ok {
             std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // The recorder views have `eval`'s problem: they only read, but opening
+    // the store to do it collides with the daemon's lock. Unlike `eval` they
+    // must still work offline, so they prefer HTTP rather than requiring it.
+    if matches!(
+        cli.command,
+        Command::SearchLog { .. }
+            | Command::AccessLog { .. }
+            | Command::Ratings { .. }
+            | Command::Heals { .. }
+    ) {
+        let reader = LogReader::open(&cli)?;
+        match &cli.command {
+            Command::SearchLog { limit } => print_search_log(&reader.searches(*limit)?),
+            Command::AccessLog { limit } => print_access_log(&reader.accesses(*limit)?),
+            Command::Ratings { limit } => print_ratings(&reader.ratings(*limit)?),
+            Command::Heals { limit } => print_heals(&reader.resolutions(*limit)?),
+            _ => unreachable!("guarded by the matches! above"),
         }
         return Ok(());
     }
@@ -526,66 +687,10 @@ fn main() -> anyhow::Result<()> {
             let s = svc.stats()?;
             println!("{}", serde_json::to_string_pretty(&s)?);
         }
-        Command::SearchLog { limit } => {
-            for e in svc.recent_searches(limit)? {
-                println!(
-                    "{}  {:>7.2}ms  {:>3} hits  {:?}",
-                    e.ts.format("%Y-%m-%d %H:%M:%S"),
-                    e.latency_us as f64 / 1000.0,
-                    e.result_count,
-                    e.query
-                );
-            }
-        }
-        Command::AccessLog { limit } => {
-            for e in svc.recent_accesses(limit)? {
-                println!("{}  {}", e.ts.format("%Y-%m-%d %H:%M:%S"), e.episode_id);
-            }
-        }
-        Command::Ratings { limit } => {
-            for e in svc.recent_ratings(limit)? {
-                println!(
-                    "{}  {:<7}  search {}  used [{}]{}",
-                    e.ts.format("%Y-%m-%d %H:%M:%S"),
-                    format!("{:?}", e.rating).to_lowercase(),
-                    &e.search_id[..8.min(e.search_id.len())],
-                    e.used_episode_ids
-                        .iter()
-                        .map(|id| &id[..8.min(id.len())])
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    e.note
-                        .as_deref()
-                        .map(|n| format!("  — {n}"))
-                        .unwrap_or_default()
-                );
-            }
-        }
-        Command::Heals { limit } => {
-            for r in svc.recent_resolutions(limit)? {
-                let replay = match &r.last_replay {
-                    None => "unreplayed".to_string(),
-                    Some(o) if o.held => format!(
-                        "held (rank {})",
-                        o.rank.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
-                    ),
-                    Some(_) => "REGRESSED".to_string(),
-                };
-                println!(
-                    "{}  {:<20}  {:?} -> {}  validated {}{}",
-                    r.ts.format("%Y-%m-%d %H:%M:%S"),
-                    replay,
-                    r.query,
-                    &r.episode_id[..8.min(r.episode_id.len())],
-                    r.validated_rank,
-                    if r.displaced_used.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  displaced [{}]", r.displaced_used.join(", "))
-                    }
-                );
-            }
-        }
+        Command::SearchLog { .. }
+        | Command::AccessLog { .. }
+        | Command::Ratings { .. }
+        | Command::Heals { .. } => unreachable!("handled before store open"),
         Command::Mcp => {
             mcp::serve_stdio(svc)?;
         }

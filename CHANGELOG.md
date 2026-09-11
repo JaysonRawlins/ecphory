@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `heals`, `ratings`, `search-log` and `access-log` read through the daemon when one is running instead of dying on redb's process-exclusive lock; `--url` is now a global flag and each read reports its source on stderr ([#15](https://github.com/JaysonRawlins/ecphory/issues/15))
 - keep `used_episode_ids` as telemetry instead of self-correction targets
 
 ## [0.3.5](https://github.com/JaysonRawlins/ecphory/compare/v0.3.4...v0.3.5) - 2026-07-18

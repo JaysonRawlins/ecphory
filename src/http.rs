@@ -604,6 +604,13 @@ mod tests {
     // service locking production uses. Never the live store.
 
     async fn spawn_server() -> (String, tempfile::TempDir) {
+        let (base, dir, _state) = spawn_server_with_state().await;
+        (base, dir)
+    }
+
+    /// Same server, but hands back the shared service so a test can compare
+    /// what came over the wire against the store's own answer.
+    async fn spawn_server_with_state() -> (String, tempfile::TempDir, Shared) {
         let dir = tempfile::tempdir().expect("tempdir");
         let svc = Ecphory::open_with(dir.path().join("e2e.redb"), true).expect("open");
         let state = Arc::new(AppState {
@@ -612,10 +619,11 @@ mod tests {
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let served = Arc::clone(&state);
         tokio::spawn(async move {
-            axum::serve(listener, build_router(state)).await.unwrap();
+            axum::serve(listener, build_router(served)).await.unwrap();
         });
-        (format!("http://{addr}"), dir)
+        (format!("http://{addr}"), dir, state)
     }
 
     fn get(base: &str, path: &str) -> serde_json::Value {
@@ -804,6 +812,93 @@ mod tests {
         match err {
             Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 400),
             other => panic!("expected 400 for bogus origin, got {other:?}"),
+        }
+    }
+
+    // ---- the CLI log views' HTTP path ----------------------------------------
+    //
+    // `heals`, `ratings`, `search-log` and `access-log` read through the
+    // daemon because redb's lock is process-exclusive (issue #15). The thing
+    // that can silently rot is the ROW SHAPE: these decode into the canonical
+    // recorder entries, and the tempting reuse — eval's `HealEntry` — is a
+    // flatter report shape that has no `last_replay` at all. So this asserts
+    // the wire answer is byte-equal to the store's own, with a replay outcome
+    // present precisely because that is the field a narrower shape would eat.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cli_log_views_match_the_store_over_http() {
+        use crate::eval::EvalClient;
+        use crate::recorder::{AccessLogEntry, RatingLogEntry, ResolutionLogEntry, SearchLogEntry};
+
+        let (base, _dir, state) = spawn_server_with_state().await;
+
+        // A miss worth healing: the target shares no vocabulary with the query.
+        add(&base, "quartz crystal resonance measured in the lab");
+        let target = add(&base, "piezoelectric oscillator drift on the bench meter");
+        get(&base, &format!("/api/v1/memory/episodes/{target}")); // an access-log row
+
+        let out = search(&base, "quartz crystal resonance");
+        post(
+            &base,
+            "/api/v1/memory/search-rating",
+            json!({
+                "search_id": out["search_id"],
+                "rating": "miss",
+                "intended_episode_ids": [target],
+                "note": "round-trip fixture",
+            }),
+        );
+        // Replay so `last_replay` is populated rather than None.
+        post(&base, "/api/v1/memory/heal-replay", json!({ "k": 5 }));
+
+        let client = EvalClient::new(base.clone(), None);
+        assert!(client.reachable(), "the daemon we just started must answer");
+        assert!(
+            !EvalClient::new("http://127.0.0.1:1".to_string(), None).reachable(),
+            "a dead port must read as unreachable, or the CLI never falls back"
+        );
+
+        let resolutions: Vec<ResolutionLogEntry> = client.resolution_log(10).unwrap();
+        assert_eq!(resolutions.len(), 1, "the heal should have resolved");
+        let r = &resolutions[0];
+        assert!(!r.query.is_empty(), "the renderer prints the query");
+        assert!(
+            r.last_replay.is_some(),
+            "replay outcome must survive the wire — this is what a flatter \
+             row shape silently drops"
+        );
+
+        let searches: Vec<SearchLogEntry> = client.search_log(10).unwrap();
+        let accesses: Vec<AccessLogEntry> = client.access_log(10).unwrap();
+        let ratings: Vec<RatingLogEntry> = client.rating_log(10).unwrap();
+        assert!(!searches.is_empty() && !accesses.is_empty() && !ratings.is_empty());
+        assert_eq!(
+            ratings[0].note.as_deref(),
+            Some("round-trip fixture"),
+            "`ratings` renders the note; it must not be projected away"
+        );
+
+        // The load-bearing claim: HTTP and a direct store read are the same rows.
+        let svc = state.svc.lock().expect("service lock");
+        for (over_http, from_store) in [
+            (
+                serde_json::to_value(&resolutions).unwrap(),
+                serde_json::to_value(svc.recent_resolutions(10).unwrap()).unwrap(),
+            ),
+            (
+                serde_json::to_value(&searches).unwrap(),
+                serde_json::to_value(svc.recent_searches(10).unwrap()).unwrap(),
+            ),
+            (
+                serde_json::to_value(&accesses).unwrap(),
+                serde_json::to_value(svc.recent_accesses(10).unwrap()).unwrap(),
+            ),
+            (
+                serde_json::to_value(&ratings).unwrap(),
+                serde_json::to_value(svc.recent_ratings(10).unwrap()).unwrap(),
+            ),
+        ] {
+            assert_eq!(over_http, from_store);
         }
     }
 }
