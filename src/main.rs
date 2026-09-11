@@ -129,7 +129,13 @@ enum Command {
     /// Store status
     Status,
     /// Verify that ecphory's context actually reaches each installed agent harness
-    Doctor,
+    Doctor {
+        /// Prove delivery by invoking each harness with a single-use canary.
+        /// Costs one model call per harness — the honest price of the only
+        /// claim that means anything. Without it, nothing reports DELIVERED.
+        #[arg(long)]
+        live: bool,
+    },
     /// Flight-recorder aggregates: query counts, zero-hit rate, latency percentiles
     Stats,
     /// Recent recorded searches, newest first
@@ -262,11 +268,15 @@ fn main() -> anyhow::Result<()> {
     // Doctor reads harness configuration from disk and must never open the
     // store: redb's lock is process-exclusive, and the daemon is normally
     // running at exactly the moment an operator wants to run doctor.
-    if matches!(cli.command, Command::Doctor) {
+    if let Command::Doctor { live } = cli.command {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .map_err(|_| anyhow::anyhow!("HOME is not set"))?;
-        let reports = harness::static_report(&home);
+        let reports = if live {
+            harness::live_report(&home)
+        } else {
+            harness::static_report(&home)
+        };
         if reports.is_empty() {
             println!(
                 "no supported agent harness detected under {}",
@@ -277,12 +287,14 @@ fn main() -> anyhow::Result<()> {
         for r in &reports {
             println!("{r}");
         }
-        println!();
-        println!(
-            "Static inspection cannot prove delivery. Four of the five known \
+        if !live {
+            println!();
+            println!(
+                "Static inspection cannot prove delivery. Four of the five known \
 silent-failure modes pass every static check, so a config that parses is not \
-evidence that text reached the model."
-        );
+evidence that text reached the model. Run `ecphory doctor --live` to settle it."
+            );
+        }
         return Ok(());
     }
 
@@ -630,7 +642,7 @@ evidence that text reached the model."
             mcp::serve_http(svc, port)?;
         }
         Command::Eval { .. } => unreachable!("handled before store open"),
-        Command::Doctor => unreachable!("handled before store open"),
+        Command::Doctor { .. } => unreachable!("handled before store open"),
     }
     Ok(())
 }

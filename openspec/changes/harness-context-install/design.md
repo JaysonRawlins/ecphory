@@ -83,6 +83,15 @@ a daemon exists.
                  inject nothing. Reserved for "we wired this and it is broken",
                  never for "we do not recognise this machine".
 
+## Known residue of the live tier
+
+Invoking a harness makes it log the session, so the canary token appears in that
+harness's own transcript (observed: a codex `rollout-*.jsonl`). This is not a
+leftover configuration edit — every rail is restored byte-identically — but it
+does mean `--live` leaves a trace in harness history. Harmless for a random
+token; worth documenting so nobody mistakes it for an unrestored canary when
+grepping.
+
 ## Open questions
 
 - codex hook stdout injection: untested (trust prompt is interactive; the bypass

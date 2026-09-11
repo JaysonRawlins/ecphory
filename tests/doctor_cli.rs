@@ -190,3 +190,119 @@ trust_level = "trusted"
         "with no adapter at all, codex should be told to add the managed block, got:\n{s}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Live tier. Harness invocation is injectable so these run against stubs: a
+// stub that echoes the rail's contents models a harness that received the
+// context, one that ignores them models a harness that did not. Without the
+// override these would cost a model call each and could not run in CI.
+// ---------------------------------------------------------------------------
+
+fn write_stub(dir: &Path, name: &str, body: &str) -> String {
+    let p = dir.join(name);
+    fs::write(&p, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p.to_string_lossy().into_owned()
+}
+
+/// opencode wired to a real artifact, with a stub that echoes that artifact —
+/// i.e. a harness that genuinely received the context.
+fn home_with_stub(home: &tempfile::TempDir, delivers: bool) -> String {
+    let art = home.path().join("artifact.md");
+    fs::write(&art, "# ecphory context\n").unwrap();
+    let cfg = home.path().join(".config/opencode");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("opencode.json"),
+        format!(r#"{{"instructions":["{}"]}}"#, art.to_string_lossy()),
+    )
+    .unwrap();
+
+    let body = if delivers {
+        format!("#!/bin/sh\ncat {}\n", art.to_string_lossy())
+    } else {
+        "#!/bin/sh\necho 4\n".to_string()
+    };
+    write_stub(home.path(), "stub.sh", &body)
+}
+
+#[test]
+fn live_reports_delivered_when_canary_round_trips() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let stub = home_with_stub(&home, true);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ecphory"));
+    cmd.arg("doctor").arg("--live").env("HOME", home.path());
+    cmd.env("ECPHORY_DOCTOR_CMD_OPENCODE", &stub);
+    let out = cmd.output().expect("run doctor --live");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(
+        s.contains("DELIVERED") && !s.contains("NOT_DELIVERED"),
+        "a canary that round-trips is DELIVERED, got:\n{s}"
+    );
+}
+
+#[test]
+fn live_reports_not_delivered_when_canary_absent() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let stub = home_with_stub(&home, false);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ecphory"));
+    cmd.arg("doctor").arg("--live").env("HOME", home.path());
+    cmd.env("ECPHORY_DOCTOR_CMD_OPENCODE", &stub);
+    let out = cmd.output().expect("run doctor --live");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(
+        s.contains("NOT_DELIVERED"),
+        "a harness that ignored the rail is NOT_DELIVERED, not UNPROVEN, got:\n{s}"
+    );
+}
+
+/// The rail is someone else's file. Doctor must hand it back exactly as found,
+/// on the failure path as much as the success one.
+#[test]
+fn live_restores_the_rail_byte_identically() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let stub = home_with_stub(&home, false); // failure path
+    let art = home.path().join("artifact.md");
+    let before = fs::read(&art).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ecphory"));
+    cmd.arg("doctor").arg("--live").env("HOME", home.path());
+    cmd.env("ECPHORY_DOCTOR_CMD_OPENCODE", &stub);
+    cmd.output().expect("run doctor --live");
+
+    assert_eq!(
+        before,
+        fs::read(&art).unwrap(),
+        "the rail must be restored byte-identically even when the check fails"
+    );
+}
+
+/// No visible rail is not evidence of no delivery — a foreign injector may be
+/// feeding the harness through something ecphory cannot see.
+#[test]
+fn live_reports_unproven_when_no_canary_target() {
+    let home = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(home.path().join(".copilot/hooks")).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ecphory"));
+    cmd.arg("doctor").arg("--live").env("HOME", home.path());
+    let out = cmd.output().expect("run doctor --live");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(
+        s.contains("UNPROVEN"),
+        "no canary target means undetermined, got:\n{s}"
+    );
+    assert!(
+        !s.contains("NOT_DELIVERED"),
+        "absence of a visible rail must not be reported as a negative, got:\n{s}"
+    );
+}

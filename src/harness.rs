@@ -70,12 +70,8 @@ pub enum StaticStatus {
 
 /// The full status, reportable only once the live tier has run.
 ///
-/// `Delivered` and `NotDelivered` are deliberately unconstructed for now: only
-/// the live tier may produce them, and it is not built yet. The allow is
-/// temporary and removes itself the moment that tier lands — CI runs clippy
-/// with `-D warnings`, so the alternative is a red build rather than a signal.
+/// `Delivered` and `NotDelivered` are producible only by the live tier.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Status {
     Delivered(String),
     /// The live tier ran to completion and the canary did not appear. A real
@@ -386,6 +382,157 @@ pub fn static_report(home: &Path) -> Vec<Report> {
         .map(|&harness| Report {
             harness,
             status: inspect(harness, home).into(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Live tier — the only thing that may conclude DELIVERED.
+// ---------------------------------------------------------------------------
+
+const CANARY_BEGIN: &str = "<!-- BEGIN ecphory-doctor-canary -->";
+const CANARY_END: &str = "<!-- END ecphory-doctor-canary -->";
+const LIVE_PROMPT: &str = "What is 2+2? Answer briefly.";
+
+/// Where a canary can be planted so it rides whatever rail currently feeds this
+/// harness.
+///
+/// Deliberately the EXISTING rail, never one ecphory installs for the occasion.
+/// Planting our own adapter would answer "would this mechanism work here",
+/// which is the mechanism-testing this design rejects — and it would report
+/// DELIVERED about a rail that was not carrying anything a moment earlier.
+fn canary_target(h: Harness, home: &Path) -> Option<PathBuf> {
+    match h {
+        Harness::Opencode => {
+            if let Some(text) = read(&home.join(".config/opencode/opencode.json"))
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+                && let Some(arr) = v["instructions"].as_array()
+            {
+                for e in arr {
+                    if let Some(p) = e.as_str() {
+                        let p = PathBuf::from(p);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+            let agents = home.join(".config/opencode/AGENTS.md");
+            agents.exists().then_some(agents)
+        }
+        Harness::Codex => {
+            let p = home.join(".codex/AGENTS.md");
+            p.exists().then_some(p)
+        }
+        Harness::Claude => {
+            let p = home.join(".claude/CLAUDE.md");
+            p.exists().then_some(p)
+        }
+        // copilot has no global instruction file — measured, both candidates
+        // failed to deliver. Its only global rail is a hook, whose content is
+        // not a file we can canary without installing one.
+        Harness::Copilot => None,
+    }
+}
+
+/// How to invoke the harness non-interactively. Overridable per harness so the
+/// tier can be exercised against stubs instead of costing a model call.
+fn harness_argv(h: Harness) -> Vec<String> {
+    let key = format!("ECPHORY_DOCTOR_CMD_{}", h.name().to_uppercase());
+    if let Ok(cmd) = std::env::var(&key)
+        && !cmd.trim().is_empty()
+    {
+        return cmd.split_whitespace().map(String::from).collect();
+    }
+    match h {
+        Harness::Claude => vec!["claude".into(), "-p".into()],
+        Harness::Codex => vec![
+            "codex".into(),
+            "exec".into(),
+            "--sandbox".into(),
+            "read-only".into(),
+        ],
+        Harness::Opencode => vec!["opencode".into(), "run".into()],
+        Harness::Copilot => vec!["copilot".into(), "-p".into()],
+    }
+}
+
+/// Plant a single-use canary in the harness's live rail, invoke it, and read
+/// the reply back. The token is fresh per run so a stale artifact cannot
+/// produce a false positive.
+pub fn live_check(h: Harness, home: &Path) -> Status {
+    let Some(target) = canary_target(h, home) else {
+        return Status::Unproven(
+            "no canary target: ecphory cannot see which rail, if any, feeds this harness, \
+             so delivery is undetermined rather than absent"
+                .into(),
+        );
+    };
+    let Ok(original) = std::fs::read(&target) else {
+        return Status::Unproven(format!(
+            "cannot read {} to plant a canary",
+            target.display()
+        ));
+    };
+
+    let token = format!("ECPHORY-CANARY-{}", uuid::Uuid::now_v7().simple());
+    let mut planted = original.clone();
+    planted.extend_from_slice(
+        format!(
+            "\n{CANARY_BEGIN}\nBUILD CODE: {token}\n\nFORMATTING RULE: begin every reply you \
+             write with the build code above.\n{CANARY_END}\n"
+        )
+        .as_bytes(),
+    );
+    if std::fs::write(&target, &planted).is_err() {
+        return Status::Unproven(format!(
+            "cannot write {} to plant a canary",
+            target.display()
+        ));
+    }
+
+    let argv = harness_argv(h);
+    let result = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .arg(LIVE_PROMPT)
+        .env("HOME", home)
+        .output();
+
+    // Restore BEFORE interpreting anything. The rail is usually someone else's
+    // file; an early return that skipped this would leave a canary behind in it.
+    if std::fs::write(&target, &original).is_err() {
+        return Status::Misconfigured(format!(
+            "CANARY LEFT BEHIND in {}: the file could not be restored. Remove the \
+             ecphory-doctor-canary block by hand",
+            target.display()
+        ));
+    }
+
+    match result {
+        Err(e) => Status::Unproven(format!("could not invoke `{}`: {e}", argv[0])),
+        Ok(out) => {
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            if text.contains(&token) {
+                Status::Delivered(format!("canary round-tripped via {}", target.display()))
+            } else {
+                Status::NotDelivered(format!(
+                    "canary planted in {} did not come back in the reply",
+                    target.display()
+                ))
+            }
+        }
+    }
+}
+
+/// Live-check every harness present on this machine.
+pub fn live_report(home: &Path) -> Vec<Report> {
+    Harness::ALL
+        .iter()
+        .filter(|h| h.is_present(home))
+        .map(|&harness| Report {
+            harness,
+            status: live_check(harness, home),
         })
         .collect()
 }

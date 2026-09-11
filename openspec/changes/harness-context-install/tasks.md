@@ -36,7 +36,17 @@
       RED-PROOF: mutated `From<StaticStatus>` to map `Unproven -> Delivered`.
       `static_tier_never_reports_delivered` FAILED (rc=101) while the other two tests stayed
       green — so the assertion is specific, not incidentally satisfied. Restored, rc=0.
-- [ ] 2.2 Live tier: fresh random canary per run, per harness, restore adapter afterwards on both success and failure paths.
+- [x] 2.2 Live tier: fresh uuid-v7 canary per run, planted in the EXISTING rail (never one
+      ecphory installs for the occasion -- that would measure "would this mechanism work"
+      rather than "is this machine delivering"), restored before the result is even
+      interpreted so a failure path cannot leave a canary in someone else's file.
+      RED-PROOF: removed the restore -> `live_restores_the_rail_byte_identically` FAILED
+      (rc=101), alone, while the other 8 stayed green. Before the tier existed that test
+      passed VACUOUSLY (doctor errored out and never touched the file), so it was worth
+      nothing until this mutation showed it could fire.
+      REAL RUN: claude/codex/opencode DELIVERED, copilot UNPROVEN (no canary target); all
+      three rails sha256-identical afterwards, verified independently of the code's own
+      restore. The result discriminates rather than printing a constant.
 - [~] 2.3 Named detection implemented for the statically-visible modes: claude non-relative
       `@import`, codex hook misplaced in `config.toml`, copilot missing `sessionStart` hook,
       opencode pointer absent or dangling. The copilot plain-text-vs-JSON mode is currently
@@ -47,6 +57,10 @@
       wrong diagnosis telling the operator to move a file that did not exist. Fixed with a
       scoped section scan; regression test
       `codex_unrelated_ecphory_mention_is_not_a_hook_misconfiguration` observed red first.
+- [~] 2.4 PARTIAL. DELIVERED/NOT_DELIVERED discrimination is proven against stubs, and the
+      restore guarantee is mutation-proven. The per-harness adapter-break proofs below
+      remain outstanding and need `install` to exist first: there is currently no
+      ecphory-managed adapter on the reference machine to break.
 - [ ] 2.4 RED-PROOF, one per harness — break that harness's adapter deliberately, confirm doctor reports it, restore. Record the exact output here. A doctor never observed failing cannot be cited.
       - [ ] 2.4.1 claude: rewrite the managed `@import` to an absolute path -> expect MISCONFIGURED (relative-path constraint)
       - [ ] 2.4.2 codex: move the hook from `hooks.json` into `config.toml` -> expect MISCONFIGURED
