@@ -62,10 +62,14 @@ fn static_tier_never_reports_delivered() {
     );
 }
 
+/// CHANGED, and the requirement changed with it: this test previously asserted
+/// that a detected harness with no ecphory adapter is MISCONFIGURED. That is
+/// now wrong. Doctor verifies the OUTCOME, not the mechanism — delivery may be
+/// carried by a rail ecphory does not own, so "no adapter I recognise" is
+/// UNPROVEN, not a defect.
 #[test]
-fn absent_adapter_reports_misconfigured() {
+fn absent_adapter_is_unproven_not_misconfigured() {
     let home = tempfile::tempdir().expect("tempdir");
-    // copilot present (CLI config dir exists) but no ecphory hook wired.
     fs::create_dir_all(home.path().join(".copilot/hooks")).unwrap();
 
     let out = doctor(home.path(), &[]);
@@ -76,8 +80,47 @@ fn absent_adapter_reports_misconfigured() {
         "copilot should be detected, got:\n{s}"
     );
     assert!(
-        s.contains("MISCONFIGURED"),
-        "a detected harness with no adapter is MISCONFIGURED, got:\n{s}"
+        s.contains("UNPROVEN"),
+        "no recognised adapter means undetermined, not broken, got:\n{s}"
+    );
+    assert!(
+        !s.contains("MISCONFIGURED"),
+        "MISCONFIGURED is reserved for an ecphory-managed adapter that is broken, got:\n{s}"
+    );
+}
+
+/// Regression for a miss observed against a real machine: opencode was reading
+/// a live ecphory-generated artifact written by an external render script, and
+/// doctor — looking only for its own pointer — failed to notice. A verification
+/// tool that recognises only its own handiwork reports on itself.
+#[test]
+fn foreign_generated_artifact_is_recognised() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let cfg = home.path().join(".config/opencode");
+    fs::create_dir_all(&cfg).unwrap();
+    // No `instructions` pointer at all — the artifact is reached by opencode's
+    // own global AGENTS.md convention, written by something ecphory does not own.
+    fs::write(cfg.join("opencode.json"), "{}").unwrap();
+    fs::write(
+        cfg.join("AGENTS.md"),
+        "<!-- GENERATED from ecphory episode 019f7ac6-667e — DO NOT HAND-EDIT. -->\n# ctx\n",
+    )
+    .unwrap();
+
+    let out = doctor(home.path(), &[]);
+    let s = stdout(&out);
+
+    assert!(
+        s.contains("UNPROVEN"),
+        "a recognised foreign rail is UNPROVEN pending a live check, got:\n{s}"
+    );
+    assert!(
+        s.contains("AGENTS.md"),
+        "the detail must name the artifact the live tier will test, got:\n{s}"
+    );
+    assert!(
+        !s.contains("MISCONFIGURED"),
+        "a working foreign rail must not be reported as a defect, got:\n{s}"
     );
 }
 

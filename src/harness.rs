@@ -69,9 +69,18 @@ pub enum StaticStatus {
 }
 
 /// The full status, reportable only once the live tier has run.
+///
+/// `Delivered` and `NotDelivered` are deliberately unconstructed for now: only
+/// the live tier may produce them, and it is not built yet. The allow is
+/// temporary and removes itself the moment that tier lands — CI runs clippy
+/// with `-D warnings`, so the alternative is a red build rather than a signal.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Status {
     Delivered(String),
+    /// The live tier ran to completion and the canary did not appear. A real
+    /// negative, distinct from `Unproven` ("not checked").
+    NotDelivered(String),
     Unproven(String),
     Misconfigured(String),
 }
@@ -89,6 +98,7 @@ impl Status {
     pub fn label(&self) -> &'static str {
         match self {
             Status::Delivered(_) => "DELIVERED",
+            Status::NotDelivered(_) => "NOT_DELIVERED",
             Status::Unproven(_) => "UNPROVEN",
             Status::Misconfigured(_) => "MISCONFIGURED",
         }
@@ -96,7 +106,10 @@ impl Status {
 
     pub fn detail(&self) -> &str {
         match self {
-            Status::Delivered(d) | Status::Unproven(d) | Status::Misconfigured(d) => d,
+            Status::Delivered(d)
+            | Status::NotDelivered(d)
+            | Status::Unproven(d)
+            | Status::Misconfigured(d) => d,
         }
     }
 }
@@ -115,6 +128,38 @@ impl fmt::Display for Report {
             self.status.label(),
             self.status.detail()
         )
+    }
+}
+
+/// Header written by any renderer that derives a file from an ecphory episode.
+/// Recognising it is how doctor sees a delivery rail it does not own.
+pub const ARTIFACT_MARKER: &str = "GENERATED from ecphory episode";
+
+/// Some(path) when this file carries the ecphory generated-artifact header.
+fn artifact_at(p: &Path) -> Option<PathBuf> {
+    let text = read(p)?;
+    if text.contains(ARTIFACT_MARKER) {
+        Some(p.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// The fallthrough when no ecphory-managed adapter was found.
+///
+/// This is deliberately NOT `Misconfigured`. Doctor verifies the outcome, not
+/// the mechanism: delivery may be carried by a host daemon or an operator's own
+/// render script, so an unrecognised machine is undetermined, not broken.
+fn undetermined(artifact: Option<PathBuf>, hint: &str) -> StaticStatus {
+    match artifact {
+        Some(p) => StaticStatus::Unproven(format!(
+            "no ecphory-managed adapter, but {} carries the ecphory generated-artifact \
+             header; delivery undetermined -- run --live",
+            p.display()
+        )),
+        None => StaticStatus::Unproven(format!(
+            "no ecphory-managed adapter found ({hint}); delivery undetermined -- run --live"
+        )),
     }
 }
 
@@ -160,20 +205,20 @@ fn toml_declares_ecphory_hook(text: &str) -> bool {
 fn inspect_claude(home: &Path) -> StaticStatus {
     // Preferred adapter: a SessionStart hook, which READS the shared artifact
     // rather than copying it.
-    if let Some(text) = read(&home.join(".claude/settings.json")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            let hooks = &v["hooks"]["SessionStart"];
-            if let Some(arr) = hooks.as_array() {
-                for group in arr {
-                    if let Some(inner) = group["hooks"].as_array() {
-                        for h in inner {
-                            if let Some(cmd) = h["command"].as_str() {
-                                if is_ecphory_hook(cmd) {
-                                    return StaticStatus::Unproven(format!(
-                                        "SessionStart hook -> {cmd}; delivery not verified"
-                                    ));
-                                }
-                            }
+    if let Some(text) = read(&home.join(".claude/settings.json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        let hooks = &v["hooks"]["SessionStart"];
+        if let Some(arr) = hooks.as_array() {
+            for group in arr {
+                if let Some(inner) = group["hooks"].as_array() {
+                    for h in inner {
+                        if let Some(cmd) = h["command"].as_str()
+                            && is_ecphory_hook(cmd)
+                        {
+                            return StaticStatus::Unproven(format!(
+                                "SessionStart hook -> {cmd}; delivery not verified"
+                            ));
                         }
                     }
                 }
@@ -184,31 +229,31 @@ fn inspect_claude(home: &Path) -> StaticStatus {
     // Fallback adapter: a managed block in CLAUDE.md. Claude Code resolves
     // `@import` ONLY for paths relative to the file containing them; absolute
     // and `~`-rooted imports resolve to nothing and report no error.
-    if let Some(text) = read(&home.join(".claude/CLAUDE.md")) {
-        if let Some(block) = managed_block(&text) {
-            for line in block.lines().map(str::trim) {
-                if let Some(path) = line.strip_prefix('@') {
-                    if path.starts_with('/') || path.starts_with('~') {
-                        return StaticStatus::Misconfigured(format!(
-                            "@import `{path}` is absolute or ~-rooted and silently resolves to \
+    if let Some(text) = read(&home.join(".claude/CLAUDE.md"))
+        && let Some(block) = managed_block(&text)
+    {
+        for line in block.lines().map(str::trim) {
+            if let Some(path) = line.strip_prefix('@') {
+                if path.starts_with('/') || path.starts_with('~') {
+                    return StaticStatus::Misconfigured(format!(
+                        "@import `{path}` is absolute or ~-rooted and silently resolves to \
                              nothing; the path must be relative to the CLAUDE.md containing it"
-                        ));
-                    }
-                    return StaticStatus::Unproven(format!(
-                        "CLAUDE.md @import `{path}`; delivery not verified"
                     ));
                 }
+                return StaticStatus::Unproven(format!(
+                    "CLAUDE.md @import `{path}`; delivery not verified"
+                ));
             }
-            return StaticStatus::Misconfigured(
-                "managed block in CLAUDE.md contains no @import line".into(),
-            );
         }
+        return StaticStatus::Misconfigured(
+            "managed block in CLAUDE.md contains no @import line".into(),
+        );
     }
 
-    StaticStatus::Misconfigured(
-        "no ecphory adapter: expected a SessionStart hook in .claude/settings.json \
-         or a managed block in .claude/CLAUDE.md"
-            .into(),
+    undetermined(
+        artifact_at(&home.join(".claude/CLAUDE.md")),
+        "expected a SessionStart hook in .claude/settings.json or a managed block in \
+         .claude/CLAUDE.md",
     )
 }
 
@@ -216,55 +261,58 @@ fn inspect_codex(home: &Path) -> StaticStatus {
     // Managed block in AGENTS.md is the zero-friction adapter: codex hooks
     // additionally require interactive persisted hook trust, which an installer
     // cannot grant.
-    if let Some(text) = read(&home.join(".codex/AGENTS.md")) {
-        if managed_block(&text).is_some() {
-            return StaticStatus::Unproven(
-                "managed block in .codex/AGENTS.md; delivery not verified".into(),
-            );
-        }
+    if let Some(text) = read(&home.join(".codex/AGENTS.md"))
+        && managed_block(&text).is_some()
+    {
+        return StaticStatus::Unproven(
+            "managed block in .codex/AGENTS.md; delivery not verified".into(),
+        );
     }
 
     // A hook in config.toml is a measured silent no-op: codex reads hooks from
     // hooks.json, so the config.toml form installs cleanly and never runs.
-    if let Some(text) = read(&home.join(".codex/config.toml")) {
-        if toml_declares_ecphory_hook(&text) {
-            return StaticStatus::Misconfigured(
-                "ecphory hook declared in .codex/config.toml, which codex does not read for \
+    if let Some(text) = read(&home.join(".codex/config.toml"))
+        && toml_declares_ecphory_hook(&text)
+    {
+        return StaticStatus::Misconfigured(
+            "ecphory hook declared in .codex/config.toml, which codex does not read for \
                  hooks; it must live in .codex/hooks.json"
-                    .into(),
-            );
-        }
+                .into(),
+        );
     }
 
-    if let Some(text) = read(&home.join(".codex/hooks.json")) {
-        if is_ecphory_hook(&text) {
-            return StaticStatus::Unproven(
-                "SessionStart hook in .codex/hooks.json; requires persisted hook trust \
+    if let Some(text) = read(&home.join(".codex/hooks.json"))
+        && is_ecphory_hook(&text)
+    {
+        return StaticStatus::Unproven(
+            "SessionStart hook in .codex/hooks.json; requires persisted hook trust \
                  (granted interactively on first run); delivery not verified"
-                    .into(),
-            );
-        }
+                .into(),
+        );
     }
 
-    StaticStatus::Misconfigured(
-        "no ecphory adapter: expected a managed block in .codex/AGENTS.md".into(),
+    undetermined(
+        artifact_at(&home.join(".codex/AGENTS.md")),
+        "expected a managed block in .codex/AGENTS.md",
     )
 }
 
 fn inspect_opencode(home: &Path) -> StaticStatus {
+    // opencode reads a global AGENTS.md as well as any configured instructions
+    // paths, so an artifact placed there by a renderer ecphory does not own is
+    // a real delivery rail. Missing it is the miss this function exists to fix.
+    let agents = artifact_at(&home.join(".config/opencode/AGENTS.md"));
+    let hint = "expected an `instructions` entry in .config/opencode/opencode.json";
+
     let cfg = home.join(".config/opencode/opencode.json");
     let Some(text) = read(&cfg) else {
-        return StaticStatus::Misconfigured(
-            "no .config/opencode/opencode.json to hold the instructions pointer".into(),
-        );
+        return undetermined(agents, hint);
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         return StaticStatus::Misconfigured("opencode.json is not valid JSON".into());
     };
     let Some(arr) = v["instructions"].as_array() else {
-        return StaticStatus::Misconfigured(
-            "opencode.json has no `instructions` array to point at the artifact".into(),
-        );
+        return undetermined(agents, hint);
     };
     for entry in arr {
         if let Some(p) = entry.as_str() {
@@ -278,7 +326,7 @@ fn inspect_opencode(home: &Path) -> StaticStatus {
             ));
         }
     }
-    StaticStatus::Misconfigured("opencode.json `instructions` array is empty".into())
+    undetermined(agents, hint)
 }
 
 fn inspect_copilot(home: &Path) -> StaticStatus {
@@ -313,10 +361,10 @@ fn inspect_copilot(home: &Path) -> StaticStatus {
             p.display()
         ));
     }
-    StaticStatus::Misconfigured(
+    undetermined(
+        None,
         "no ecphory sessionStart hook in .copilot/hooks/; copilot has no global instruction \
-         file, so the hook is its only single-source rail"
-            .into(),
+         file, so a hook is its only single-source rail",
     )
 }
 

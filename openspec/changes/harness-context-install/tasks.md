@@ -8,6 +8,25 @@
 - [x] 1.2 Config targets resolved. `~/.config/github-copilot/` is the EDITOR's dir and is
       not a CLI rail (measured: a canary there was not delivered); `~/.copilot/` is the CLI's.
 
+## 1b. PIVOT — doctor verifies the OUTCOME, not the mechanism
+
+- [x] 1b.1 Forced by observation: the first doctor build reported `opencode UNPROVEN`
+      by looking for its own pointer, while that machine's opencode was already reading a
+      live ecphory-generated artifact written by an external render script. A verification
+      tool that recognises only its own handiwork reports on itself.
+- [x] 1b.2 `MISCONFIGURED` narrowed to "an ecphory-managed adapter exists and is broken".
+      Absence of a known adapter is now `UNPROVEN` — delivery may ride a rail ecphory does
+      not own. Test `absent_adapter_reports_misconfigured` asserted the OLD rule and was
+      changed deliberately; the requirement moved, so the test had to.
+- [x] 1b.3 Artifact recognition via the `GENERATED from ecphory episode` header. On the
+      reference machine this immediately surfaced a rail the manual survey had MISSED:
+      `~/.codex/AGENTS.md` also carries it.
+- [x] 1b.4 `install` demoted from authority to convenience; it must no-op where delivery
+      already happens. A host security daemon on that machine already has trusted hooks on
+      all four harnesses — install must not fight or duplicate that.
+- [x] 1b.5 `NOT_DELIVERED` added: the live tier running and finding no canary is a real
+      negative, distinct from `UNPROVEN` ("not checked").
+
 ## 2. doctor (build FIRST — install without it ships all five silent no-ops at once)
 
 - [x] 2.1 Static tier: classifies MISCONFIGURED / UNPROVEN. The guarantee is TYPE-LEVEL, not

@@ -51,6 +51,38 @@ for each harness, break that harness's adapter deliberately, confirm doctor
 reports it, restore. Recorded in tasks.md with the exact output. A doctor never
 observed failing is indistinguishable from a doctor that cannot fail.
 
+## Why install is demoted
+
+The reference machine already has, independently of ecphory:
+
+- a security daemon (Placet) with INSTALLED AND TRUSTED hooks on all four
+  harnesses, in four different formats — it solved the hard problem this change
+  set out to solve, including codex's interactive hook-trust grant;
+- a render script writing one ecphory episode into per-harness artifacts
+  (`~/.config/opencode/AGENTS.md` carries a `GENERATED from ecphory episode`
+  header today).
+
+Neither is ecphory's code, and both may already be delivering. If `install`
+were the authority, it would either fight these or duplicate them. Demoting it
+to convenience, and letting a live canary settle delivery, makes ecphory
+correct on a machine it does not own.
+
+A host daemon is nonetheless the wrong PLACE for this, shipped: it would make a
+memory store depend on a separate tool the target user does not have. Note also
+that gate hooks typically fire `preToolUse`, which is after the first tool call
+and repeats on every one — the wrong event for session context even where such
+a daemon exists.
+
+## Status vocabulary
+
+  DELIVERED      live canary round-tripped. The only positive claim.
+  NOT_DELIVERED  live tier ran and the canary did not appear. A real negative.
+  UNPROVEN       not live-checked, or no ecphory-managed adapter found. Absence
+                 of a KNOWN adapter is not evidence of absent delivery.
+  MISCONFIGURED  an ECPHORY-MANAGED adapter exists and is in a shape measured to
+                 inject nothing. Reserved for "we wired this and it is broken",
+                 never for "we do not recognise this machine".
+
 ## Open questions
 
 - codex hook stdout injection: untested (trust prompt is interactive; the bypass

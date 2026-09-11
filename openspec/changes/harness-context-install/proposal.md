@@ -25,13 +25,23 @@ current product can tell those two apart.
 - **One rendered context artifact**, already the shape `triggers` and
   `seed-principles-pack` assume: a `rendered-artifact` episode regenerated on
   write. This change consumes it; it does not redefine it.
-- **`ecphory install`**: detect installed harnesses and wire each to that one
-  artifact using its own proven adapter. Idempotent, reversible, and it never
-  silently edits a config it cannot restore byte-identically.
-- **`ecphory doctor`**: verify *delivery*, not configuration. Reports per harness
-  as DELIVERED / UNPROVEN / MISCONFIGURED. It MUST NOT report OK from static
-  inspection, because a correct-looking config and text actually reaching the
-  model are different facts — that gap is the entire reason this change exists.
+- **`ecphory doctor`**: verify the OUTCOME, not the mechanism. Doctor asks one
+  question — did ecphory's context reach this harness's model? — and does not
+  care which rail carried it. An ecphory-installed adapter, a host security
+  daemon that already injects on every harness, a hand-rolled render script:
+  all are equally valid answers. Doctor is the authority.
+- **`ecphory install`**: best-effort convenience that wires an adapter where
+  nothing already delivers. It is NOT the authority and MUST no-op where
+  delivery already happens. Idempotent, reversible, never edits a config it
+  cannot restore byte-identically.
+
+The outcome-not-mechanism rule was forced by observation, not taste. The first
+doctor build reported `opencode UNPROVEN` on the reference machine by checking
+for its own pointer — while that machine's opencode was already reading a live
+ecphory-generated artifact at `~/.config/opencode/AGENTS.md`, written by an
+existing render script. Doctor looked for its own mechanism and missed a working
+delivery path in plain sight. A verification tool that only recognises its own
+handiwork is a tool that reports on itself.
 
 ## Adapters (all measured, not assumed)
 
