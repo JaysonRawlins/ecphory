@@ -191,6 +191,39 @@ fn opt_vec(v: Vec<String>) -> Option<Vec<String>> {
     if v.is_empty() { None } else { Some(v) }
 }
 
+/// Search returns ranked CANDIDATES, not documents.
+///
+/// Full episode bodies across ten results measured ~34KB — three times the size
+/// of an entire index file, and past GitHub Copilot CLI's inline tool-output
+/// limit, where it spilled to a temp file, made the agent shell-grep it, and
+/// ended with a real hit rated `miss`. Truncating the body keeps all ten
+/// candidates (recall is unchanged) while cutting the payload roughly tenfold;
+/// the agent fetches the one it picked with get_episode.
+const SNIPPET_CHARS: usize = 400;
+
+fn snippet(ep: &crate::model::Episode) -> serde_json::Value {
+    let total = ep.content.chars().count();
+    let truncated = total > SNIPPET_CHARS;
+    let body: String = if truncated {
+        let mut b: String = ep.content.chars().take(SNIPPET_CHARS).collect();
+        b.push('…');
+        b
+    } else {
+        ep.content.clone()
+    };
+    serde_json::json!({
+        "id": ep.id,
+        "name": ep.name,
+        "content": body,
+        "content_truncated": truncated,
+        "content_chars": total,
+        "search_phrases": ep.search_phrases,
+        "tags": ep.tags,
+        "group_id": ep.group_id,
+        "created_at": ep.created_at,
+    })
+}
+
 #[tool_router]
 impl McpServer {
     pub fn new(svc: Arc<Mutex<Ecphory>>) -> Self {
@@ -229,7 +262,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search memories (BM25 over content, names, and search phrases). Returns ranked episodes with scores, plus a search_id — after you've read the results and know whether they answered the question, pass that search_id to rate_search."
+        description = "Search memories (BM25 over content, names, and search phrases). Returns ranked CANDIDATES: each carries a truncated content snippet plus `content_truncated`/`content_chars` — call get_episode with the id for the full text of one you want. Also returns a search_id: after you've read the results and know whether they answered the question, pass it to rate_search."
     )]
     fn search(&self, Parameters(req): Parameters<SearchRequest>) -> Result<String, ErrorData> {
         let origin: crate::recorder::SearchOrigin = req
@@ -257,7 +290,9 @@ impl McpServer {
         let results: Vec<_> = out
             .results
             .iter()
-            .map(|r| serde_json::json!({ "rank": r.rank, "score": r.score, "episode": r.episode }))
+            .map(|r| {
+                serde_json::json!({ "rank": r.rank, "score": r.score, "episode": snippet(&r.episode) })
+            })
             .collect();
         to_json(&serde_json::json!({
             "count": results.len(),
@@ -613,4 +648,62 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
         axum::serve(listener, router).await?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Episode;
+
+    /// Ten full episode bodies measured ~34KB, which is past Copilot CLI's
+    /// inline tool-output limit — it spilled the result to a temp file and the
+    /// agent rated a real hit as a miss. The snippet keeps every candidate.
+    #[test]
+    fn snippet_truncates_a_long_body_and_says_so() {
+        let long = "x".repeat(SNIPPET_CHARS * 3);
+        let ep = Episode::new(&long, "test");
+        let v = snippet(&ep);
+
+        let body = v["content"].as_str().unwrap();
+        assert!(
+            body.chars().count() <= SNIPPET_CHARS + 1,
+            "body should be capped, got {} chars",
+            body.chars().count()
+        );
+        assert_eq!(v["content_truncated"], serde_json::json!(true));
+        assert_eq!(
+            v["content_chars"],
+            serde_json::json!(SNIPPET_CHARS * 3),
+            "the agent needs the true length to decide whether to fetch the rest"
+        );
+    }
+
+    #[test]
+    fn snippet_leaves_a_short_body_whole() {
+        let ep = Episode::new("short enough to keep", "test");
+        let v = snippet(&ep);
+
+        assert_eq!(v["content"], serde_json::json!("short enough to keep"));
+        assert_eq!(v["content_truncated"], serde_json::json!(false));
+    }
+
+    /// Truncation is only safe because what remains is enough to CHOOSE with:
+    /// an id to fetch, and the name/phrases that carry why it matched.
+    #[test]
+    fn snippet_keeps_the_fields_needed_to_choose() {
+        let mut ep = Episode::new("y".repeat(SNIPPET_CHARS * 2), "test");
+        ep.name = Some("the one about hooks".into());
+        ep.search_phrases = vec!["why did my hook not fire".into()];
+        let v = snippet(&ep);
+
+        assert!(
+            !v["id"].is_null(),
+            "id is how the agent fetches the full text"
+        );
+        assert_eq!(v["name"], serde_json::json!("the one about hooks"));
+        assert_eq!(
+            v["search_phrases"],
+            serde_json::json!(["why did my hook not fire"])
+        );
+    }
 }
