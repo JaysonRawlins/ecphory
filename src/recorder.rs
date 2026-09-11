@@ -2,6 +2,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+tokio::task_local! {
+    /// Which harness issued the request currently being served.
+    ///
+    /// Stamped by install into each harness's MCP URL (`?client=…`) and set by
+    /// the MCP HTTP middleware for the life of one request. It is CONFIGURED
+    /// rather than detected because the MCP handshake cannot tell harnesses
+    /// apart: claude, codex, opencode and copilot every one declare themselves
+    /// `rmcp 2.2.0` (measured 2026-09-11). Asking the agent to self-report
+    /// instead would record a value it has no way to verify.
+    ///
+    /// Unset for CLI and REST callers, which is the honest answer for them.
+    pub static CLIENT: Option<String>;
+}
+
+/// The calling harness, if this request carried a stamp.
+pub fn current_client() -> Option<String> {
+    CLIENT.try_with(|c| c.clone()).ok().flatten()
+}
+
 /// The flight recorder: every search and every by-id fetch, recorded in the
 /// same redb file as the episodes. This is the design's center of gravity —
 /// retrieval quality gets scored against the real query stream, not a
@@ -98,6 +117,11 @@ pub struct SearchLogEntry {
     pub result_count: usize,
     pub results: Vec<LoggedHit>,
     pub latency_us: u64,
+    /// The harness that issued this search. Absent on CLI/REST traffic and on
+    /// rows written before stamping existed. Without it, a harness that
+    /// mis-rates cannot be told apart from one that retrieves badly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 /// The used-signal: a by-id fetch. A fetch shortly after a search marks
@@ -158,6 +182,11 @@ pub struct RatingLogEntry {
     pub corrections: Vec<Correction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The harness that issued this verdict. A `miss` from a harness that
+    /// could not READ the results is not the same fact as a retrieval failure,
+    /// and without this both land in the same ground truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 /// One self-correction attempt: on a non-hit rating with a known target,
@@ -475,6 +504,7 @@ mod tests {
             intended_episode_ids: vec![],
             corrections: vec![],
             note: None,
+            client: None,
         };
         // Two distinct searches: "s_healed" has a resolution, "s_open" does
         // not. (Sharing one search_id would model the additive-heal case,
@@ -530,6 +560,7 @@ mod tests {
             intended_episode_ids: vec![],
             corrections: vec![],
             note: None,
+            client: None,
         };
 
         // The immutable original miss (its id is NEVER referenced by any

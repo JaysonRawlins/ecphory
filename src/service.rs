@@ -451,6 +451,7 @@ impl Ecphory {
                     })
                     .collect(),
                 latency_us: outcome.latency_us as u64,
+                client: crate::recorder::current_client(),
             });
             outcome.search_id = Some(search_id);
         }
@@ -530,6 +531,7 @@ impl Ecphory {
             intended_episode_ids,
             corrections,
             note,
+            client: crate::recorder::current_client(),
         };
         self.store.log_rating(&entry)?;
         for resolution in &resolutions {

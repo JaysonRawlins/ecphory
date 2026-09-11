@@ -21,6 +21,11 @@ pub struct McpServer {
     // Tool handlers take &self; index writes need &mut — a plain mutex,
     // never held across an await.
     svc: Arc<Mutex<Ecphory>>,
+    /// Which harness this session belongs to, captured at construction from
+    /// the `?client=` stamp. Tool handlers run in a task spawned by rmcp, so a
+    /// request-scoped task-local cannot reach them — the value has to ride on
+    /// the server instance instead.
+    client: Option<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -226,9 +231,10 @@ fn snippet(ep: &crate::model::Episode) -> serde_json::Value {
 
 #[tool_router]
 impl McpServer {
-    pub fn new(svc: Arc<Mutex<Ecphory>>) -> Self {
+    pub fn new(svc: Arc<Mutex<Ecphory>>, client: Option<String>) -> Self {
         Self {
             svc,
+            client,
             tool_router: Self::tool_router(),
         }
     }
@@ -270,8 +276,10 @@ impl McpServer {
             .parse()
             .map_err(|e: String| ErrorData::invalid_params(e, None))?;
         let svc = self.svc.lock().map_err(internal)?;
-        let out = svc
-            .search_tagged(
+        // The handler runs in a task rmcp spawned, so re-establish the stamp
+        // for the duration of the call the recorder reads it from.
+        let out = crate::recorder::CLIENT.sync_scope(self.client.clone(), || {
+            svc.search_tagged(
                 &req.query,
                 &SearchOptions {
                     limit: if req.max_results == 0 {
@@ -286,7 +294,8 @@ impl McpServer {
                 },
                 origin,
             )
-            .map_err(internal)?;
+        });
+        let out = out.map_err(internal)?;
         let results: Vec<_> = out
             .results
             .iter()
@@ -314,15 +323,16 @@ impl McpServer {
             .parse()
             .map_err(|e: String| ErrorData::invalid_params(e, None))?;
         let mut svc = self.svc.lock().map_err(internal)?;
-        let entry = svc
-            .rate_search(
+        let entry = crate::recorder::CLIENT.sync_scope(self.client.clone(), || {
+            svc.rate_search(
                 &req.search_id,
                 rating,
                 req.used_episode_ids,
                 req.intended_episode_ids,
                 opt_str(req.note),
             )
-            .map_err(not_found)?;
+        });
+        let entry = entry.map_err(not_found)?;
         to_json(&serde_json::json!({
             "success": true,
             "rating_id": entry.id,
@@ -510,13 +520,37 @@ fn parse_interval(raw: &str) -> Option<std::time::Duration> {
 
 /// Serve MCP over stdio until the client disconnects. Single-client only:
 /// a second process cannot open the store (redb lock). Prefer `serve`.
+/// Extract and sanitise the `?client=` stamp from an MCP request URL.
+///
+/// Restricted to a short safe charset: this value lands in the search and
+/// rating tape, and an unbounded string off a URL has no business going there
+/// verbatim.
+fn client_stamp(query: Option<&str>) -> Option<String> {
+    let raw = query?
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("client="))?;
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(32)
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 pub fn serve_stdio(svc: Ecphory) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         use rmcp::ServiceExt;
-        let service = McpServer::new(Arc::new(Mutex::new(svc)))
-            .serve(rmcp::transport::stdio())
-            .await?;
+        // stdio has no URL to hang a `?client=` stamp on, so the env var is
+        // its equivalent; install sets it alongside the command.
+        let service = McpServer::new(
+            Arc::new(Mutex::new(svc)),
+            std::env::var("ECPHORY_CLIENT")
+                .ok()
+                .filter(|v| !v.is_empty()),
+        )
+        .serve(rmcp::transport::stdio())
+        .await?;
         service.waiting().await?;
         Ok(())
     })
@@ -618,7 +652,15 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
         config.stateful_mode = false;
         config.json_response = true;
         let service = StreamableHttpService::new(
-            move || Ok(McpServer::new(shared.clone())),
+            // The factory runs INSIDE the request task, where the
+            // middleware's stamp is still visible; the tool handler runs in a
+            // task rmcp spawns, where it is not. So capture it here.
+            move || {
+                Ok(McpServer::new(
+                    shared.clone(),
+                    crate::recorder::current_client(),
+                ))
+            },
             Arc::new(LocalSessionManager::default()),
             config,
         );
@@ -629,15 +671,20 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
         let router = crate::http::build_router(state).nest_service(
             "/mcp",
             axum::Router::new().fallback_service(service).layer(
-                axum::middleware::map_request(
-                    |mut req: axum::http::Request<axum::body::Body>| async {
+                axum::middleware::from_fn(
+                    |mut req: axum::http::Request<axum::body::Body>,
+                     next: axum::middleware::Next| async move {
                         req.headers_mut().insert(
                             axum::http::header::ACCEPT,
                             axum::http::HeaderValue::from_static(
                                 "application/json, text/event-stream",
                             ),
                         );
-                        req
+                        // Scope the stamp to this request, so anything the
+                        // tool call records downstream can see who asked
+                        // without threading it through every signature.
+                        let stamp = client_stamp(req.uri().query());
+                        crate::recorder::CLIENT.scope(stamp, next.run(req)).await
                     },
                 ),
             ),
@@ -685,6 +732,45 @@ mod tests {
 
         assert_eq!(v["content"], serde_json::json!("short enough to keep"));
         assert_eq!(v["content_truncated"], serde_json::json!(false));
+    }
+
+    /// The stamp is configured by install, but it still arrives off a URL and
+    /// lands in the tape, so it is filtered rather than trusted.
+    #[test]
+    fn client_stamp_reads_the_value() {
+        assert_eq!(
+            client_stamp(Some("client=claude-code")),
+            Some("claude-code".to_string())
+        );
+        assert_eq!(
+            client_stamp(Some("foo=1&client=codex&bar=2")),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn client_stamp_is_absent_when_unstamped() {
+        assert_eq!(client_stamp(None), None);
+        assert_eq!(client_stamp(Some("other=1")), None);
+        assert_eq!(client_stamp(Some("client=")), None);
+        // Everything filtered out is the same as no stamp at all.
+        assert_eq!(client_stamp(Some("client=!!!")), None);
+    }
+
+    #[test]
+    fn client_stamp_strips_and_bounds_untrusted_input() {
+        // Newlines would forge tape entries; quotes and spaces are dropped too.
+        assert_eq!(
+            client_stamp(Some("client=cla ude\n\"evil")),
+            Some("claudeevil".to_string())
+        );
+        // NOT percent-decoded: `%20` survives as the characters `2` and `0`.
+        // install writes this value, so it is never encoded in practice, and
+        // decoding would add a parser for no benefit. Filtering still bounds
+        // the damage to a harmless label.
+        assert_eq!(client_stamp(Some("client=a%20b")), Some("a20b".to_string()));
+        let long = format!("client={}", "a".repeat(200));
+        assert_eq!(client_stamp(Some(&long)).unwrap().len(), 32);
     }
 
     /// Truncation is only safe because what remains is enough to CHOOSE with:
