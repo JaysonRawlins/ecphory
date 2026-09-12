@@ -368,6 +368,13 @@ fn main() -> anyhow::Result<()> {
         for r in &reports {
             println!("{r}");
         }
+        let unstamped = install::stamp_report(&home);
+        if !unstamped.is_empty() {
+            println!();
+            for line in &unstamped {
+                println!("{line}");
+            }
+        }
         if !live {
             println!();
             println!(

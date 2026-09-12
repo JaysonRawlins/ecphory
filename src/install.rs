@@ -381,3 +381,37 @@ pub fn uninstall_plan(home: &Path) -> Vec<Plan> {
         })
         .collect()
 }
+
+/// Per-harness ATTRIBUTION state, for `doctor`.
+///
+/// Delivery and attribution are different facts and doctor only reported the
+/// first. A harness can be DELIVERED and still record every search as
+/// `client=None`, because a config edit dropped the `?client=` stamp — and
+/// nothing said so. Since a mis-rating from an unattributable harness is
+/// indistinguishable from a genuine retrieval failure, and both feed heal
+/// replay and the gold set, silence there is expensive.
+///
+/// Returns one line per harness that needs attention; an empty vec means every
+/// detected harness is correctly stamped.
+pub fn stamp_report(home: &Path) -> Vec<String> {
+    plan(home)
+        .into_iter()
+        .filter_map(|p| {
+            let h = p.harness.name();
+            match p.action {
+                Action::Stamp { ref server, .. } => Some(format!(
+                    "{h:<9} UNSTAMPED     `{server}` carries no client stamp; searches record \
+                     client=None (fix: ecphory install --apply)"
+                )),
+                Action::Add { .. } => Some(format!(
+                    "{h:<9} UNSTAMPED     no ecphory server configured, so nothing to attribute"
+                )),
+                Action::Collision { ref servers } => Some(format!(
+                    "{h:<9} UNSTAMPED     two ecphory servers ({}) -- attribution is ambiguous",
+                    servers.join(", ")
+                )),
+                Action::Ok { .. } | Action::NoConfig(_) => None,
+            }
+        })
+        .collect()
+}

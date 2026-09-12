@@ -306,3 +306,45 @@ fn live_reports_unproven_when_no_canary_target() {
         "absence of a visible rail must not be reported as a negative, got:\n{s}"
     );
 }
+
+/// doctor proves DELIVERY; it said nothing about ATTRIBUTION. A config edit
+/// could silently drop the `?client=` stamp and every subsequent search would
+/// land in the tape as `None`, making a harness that mis-rates
+/// indistinguishable from one that retrieves badly — with nothing reporting it.
+#[test]
+fn doctor_reports_a_missing_client_stamp() {
+    let home = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(home.path().join(".claude")).unwrap();
+    fs::write(
+        home.path().join(".claude.json"),
+        r#"{"mcpServers":{"Ecphory":{"type":"http","url":"http://127.0.0.1:3491/mcp"}}}"#,
+    )
+    .unwrap();
+
+    let out = doctor(home.path(), &[]);
+    let s = stdout(&out);
+
+    assert!(
+        s.to_lowercase().contains("unstamped") || s.to_lowercase().contains("no client stamp"),
+        "an unstamped harness must be reported, got:\n{s}"
+    );
+}
+
+#[test]
+fn doctor_is_quiet_about_a_correctly_stamped_harness() {
+    let home = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(home.path().join(".claude")).unwrap();
+    fs::write(
+        home.path().join(".claude.json"),
+        r#"{"mcpServers":{"Ecphory":{"type":"http","url":"http://127.0.0.1:3491/mcp?client=claude-code"}}}"#,
+    )
+    .unwrap();
+
+    let out = doctor(home.path(), &[]);
+    let s = stdout(&out);
+
+    assert!(
+        !s.to_lowercase().contains("unstamped"),
+        "a stamped harness should not be flagged, got:\n{s}"
+    );
+}
