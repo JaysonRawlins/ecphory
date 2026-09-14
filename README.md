@@ -33,6 +33,40 @@ must earn its way in through the flight recorder.
    extension downloads at startup, no embedding daemon to silently fail, no
    cwd-relative database paths.
 
+## Self-correction: search → rate → heal
+
+![The search, rate, heal cycle: a query misses, the miss is rated with the
+episode that should have surfaced, the failed query becomes that episode's next
+search phrase, and the same query then ranks.](docs/assets/heal-cycle.gif)
+
+Retrieval failures are the most valuable signal the store produces, so they are
+captured rather than discarded. An agent rates a search by its `search_id`
+(`hit` / `partial` / `miss`); on a miss it passes `intended_episode_ids` — the
+episode it *should* have found, discovered by some other route.
+
+That triggers self-correction. The mechanism is deliberately dumb: **the failed
+query is appended verbatim to the target episode's `search_phrases`.** No model
+call, no paraphrasing, exactly one phrase per heal — the premise being that the
+query *is* how that episode will be asked for again. The `phrases` field carries
+a 2.0× BM25 boost, so a single appended phrase is a large lexical signal for
+exactly the wording that failed. The search then re-runs to validate, and
+whether it worked is recorded rather than assumed:
+`Enriched` (target now in the top 5), `AlreadyRanks` (it was already there — a
+stale rating), `EnrichedStillLow` (the gap is crowding, not vocabulary),
+`DuplicatePhrase`, or `PhraseCapReached`.
+
+Two guardrails keep this from degrading into lexical spam. `search_phrases` is
+capped at 8 per episode — unbounded miss-driven growth would turn a much-missed
+episode into lexical mass that crowds out its siblings. And a collateral check
+warns when a heal displaces an episode that prior ratings marked as *used*.
+
+**Ratings are never mutated.** Healing an old miss mints a *new* rating rather
+than flipping the original: first-contact failure rate is an acceptance metric,
+and rewriting a miss into a hit would be cooking it. Each validated heal instead
+writes a `resolution_log` row, which is **exempt from the 90-day recorder
+prune** — every healed miss becomes a permanent regression test. `ecphory eval
+--heals` replays them all and exits non-zero if any heal has regressed.
+
 ## Deletion story
 
 Deletion is two-phase, and the phases have different owners:
@@ -113,10 +147,25 @@ See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
 
 ## Status
 
-v0.2: canonical store, tantivy BM25 search with write-time phrase boosting,
+v0.3.5. Canonical store, tantivy BM25 search with write-time phrase boosting,
 flight recorder, MCP daemon (stdio + streamable HTTP), REST mirror, eval
-harness (gold-set + used-signal), git mirror export/import. Running in
-production as the author's daily-driver agent memory since 2026-07-12.
+harness (gold-set, used-signal, and `--from-log` against the real workload),
+git mirror export/import. Since v0.3.3 the recorder closes the loop: explicit
+search ratings drive the self-correction cycle described above, validated
+heals are kept as permanent regression tests (`eval --heals`), and
+tape entries carry an `origin` tag so eval and backfill sweeps stay out of the
+organic workload statistics. Two-phase deletion (agent demote, operator purge)
+landed in v0.3.4.
+
+Running in production as the author's daily-driver agent memory since
+2026-07-12.
+
+Known gaps: every open of a non-empty store reindexes it wholesale, because the
+cold-start emptiness probe tokenizes to nothing and so reads every index as
+empty ([#30](https://github.com/JaysonRawlins/ecphory/issues/30)). It is
+invisible at the current corpus size, and that accidental rebuild is what
+repairs index drift today, which makes it a two-part fix rather than a
+one-liner.
 
 ## Lineage
 
