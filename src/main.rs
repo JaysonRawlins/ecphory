@@ -9,6 +9,7 @@ mod model;
 mod recorder;
 mod service;
 mod store;
+mod subject_index;
 mod triggers;
 
 use std::path::PathBuf;
@@ -128,6 +129,29 @@ enum Command {
         /// Commit the mirror after writing
         #[arg(long)]
         commit: bool,
+    },
+    /// Render this workspace's recall keys into each harness's instruction
+    /// file: `AGENTS.md` for codex/agy/opencode, Claude Code's per-project
+    /// `MEMORY.md`. Keys only — the content stays in ecphory. Reads the live
+    /// daemon over HTTP, so it is safe to run from a post-write trigger.
+    RenderIndex {
+        /// Workspace directory (default: the current one). Resolved to its
+        /// git toplevel, so a linked worktree renders the repo's index.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Output file (repeatable). Replaces the default targets entirely.
+        #[arg(long = "out")]
+        out: Vec<PathBuf>,
+        /// Report stale targets and exit non-zero; write nothing
+        #[arg(long)]
+        check: bool,
+    },
+    /// Print the tag that puts an episode in a workspace's subject index
+    /// (`ws:<slug>`), so a capturing agent knows what to tag
+    WorkspaceKey {
+        /// Workspace directory (default: the current one)
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Rebuild the search index from the store (recovery / schema change)
     Reindex,
@@ -354,6 +378,22 @@ fn print_heals(entries: &[ResolutionLogEntry]) {
     }
 }
 
+/// The workspace a subject index is scoped to: an explicit `--workspace`, or
+/// the current directory, resolved to its canonical working-copy root.
+fn resolve_workspace(explicit: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
+    let start = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    if !start.is_dir() {
+        anyhow::bail!("workspace {} is not a directory", start.display());
+    }
+    // Canonicalize first: the tag must not change when the same directory is
+    // reached through a symlink (/tmp vs /private/tmp on macOS).
+    let start = std::fs::canonicalize(&start).unwrap_or(start);
+    Ok(subject_index::workspace_root(&start))
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -413,6 +453,49 @@ fn main() -> anyhow::Result<()> {
             Command::Ratings { limit } => print_ratings(&reader.ratings(*limit)?),
             Command::Heals { limit } => print_heals(&reader.resolutions(*limit)?),
             _ => unreachable!("guarded by the matches! above"),
+        }
+        return Ok(());
+    }
+
+    // Same rule as eval: these read the live daemon and must never open the
+    // store. The render is fired by a post-write trigger, which runs while
+    // the daemon holds redb's process-exclusive lock.
+    if let Command::WorkspaceKey { workspace } = &cli.command {
+        let ws = resolve_workspace(workspace.as_deref())?;
+        println!("{}", subject_index::workspace_tag(&ws));
+        return Ok(());
+    }
+    if let Command::RenderIndex {
+        workspace,
+        out,
+        check,
+    } = &cli.command
+    {
+        let ws = resolve_workspace(workspace.as_deref())?;
+        let tag = subject_index::workspace_tag(&ws);
+        let url = daemon_url(cli.url.as_deref());
+        let episodes = subject_index::fetch_scoped(&url, auth_token().as_deref(), &tag)?;
+        let targets = if out.is_empty() {
+            subject_index::default_targets(&ws)?
+        } else {
+            out.clone()
+        };
+        let rows = subject_index::rows_for(&episodes, &tag).len();
+        let mut stale = false;
+        for path in &targets {
+            if *check {
+                if subject_index::is_stale(&episodes, &tag, path)? {
+                    println!("STALE {}", path.display());
+                    stale = true;
+                }
+            } else if subject_index::render_into(&episodes, &tag, path)? {
+                println!("wrote {} ({rows} keys for {tag})", path.display());
+            } else {
+                println!("unchanged {}", path.display());
+            }
+        }
+        if stale {
+            std::process::exit(1);
         }
         return Ok(());
     }
@@ -704,7 +787,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(3491);
             mcp::serve_http(svc, port)?;
         }
-        Command::Eval { .. } => unreachable!("handled before store open"),
+        Command::Eval { .. } | Command::RenderIndex { .. } | Command::WorkspaceKey { .. } => {
+            unreachable!("handled before store open")
+        }
     }
     Ok(())
 }

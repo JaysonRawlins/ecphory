@@ -193,21 +193,26 @@ struct SearchQuery {
     origin: Option<String>,
 }
 
+/// `a,b` -> `["a", "b"]`. The wire convention for tag filters across the
+/// REST surface: serde_urlencoded has no sequence support, so a repeated
+/// `?tag=` would not deserialize.
+fn csv_tags(raw: Option<String>) -> Vec<String> {
+    raw.map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Response {
     let origin: crate::recorder::SearchOrigin =
         match q.origin.as_deref().unwrap_or_default().parse() {
             Ok(o) => o,
             Err(e) => return err(StatusCode::BAD_REQUEST, e),
         };
-    let tags = q
-        .tags
-        .map(|t| {
-            t.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
+    let tags = csv_tags(q.tags);
     let opts = SearchOptions {
         limit: if q.max_results == 0 {
             10
@@ -250,6 +255,11 @@ struct ListQuery {
     max_results: usize,
     #[serde(default)]
     include_deleted: bool,
+    /// Comma-separated; all must be present. The subject-index renderer
+    /// uses `?tags=ws:<slug>` to pull one workspace's episodes without
+    /// dragging the whole store across the wire.
+    #[serde(default)]
+    tags: Option<String>,
 }
 
 async fn list_episodes(State(state): State<Shared>, Query(q): Query<ListQuery>) -> Response {
@@ -261,6 +271,7 @@ async fn list_episodes(State(state): State<Shared>, Query(q): Query<ListQuery>) 
             q.max_results
         },
         include_deleted: q.include_deleted,
+        tags: csv_tags(q.tags),
         ..Default::default()
     }) {
         Ok(eps) => Json(json!({"count": eps.len(), "episodes": eps})).into_response(),
@@ -900,5 +911,39 @@ mod tests {
         ] {
             assert_eq!(over_http, from_store);
         }
+    }
+
+    // ---- subject-index support: listing scoped to a workspace tag ----------
+    //
+    // The renderer needs one workspace's episodes without pulling the whole
+    // store across the wire on every write. It reads over HTTP (the daemon
+    // holds the redb lock), so the filter has to live here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn list_episodes_filters_by_tag() {
+        let (base, _dir) = spawn_server().await;
+        post(
+            &base,
+            "/api/v1/memory",
+            json!({"content": "mine", "tags": ["ws:-work-x", "gotcha"]}),
+        );
+        post(
+            &base,
+            "/api/v1/memory",
+            json!({"content": "theirs", "tags": ["ws:-work-y"]}),
+        );
+
+        let all = get(&base, "/api/v1/memory/episodes?max_results=50");
+        assert_eq!(all["count"].as_u64().unwrap(), 2);
+
+        let scoped = get(
+            &base,
+            "/api/v1/memory/episodes?max_results=50&tags=ws:-work-x",
+        );
+        assert_eq!(
+            scoped["count"].as_u64().unwrap(),
+            1,
+            "tag filter did not scope the listing: {scoped}"
+        );
+        assert_eq!(scoped["episodes"][0]["content"].as_str().unwrap(), "mine");
     }
 }

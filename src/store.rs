@@ -38,12 +38,16 @@ pub struct Store {
     store_id: Uuid,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct ListOptions {
     pub include_deleted: bool,
     pub include_expired: bool,
     /// 0 means no limit.
     pub limit: usize,
+    /// Every listed episode must carry all of these tags. Empty = no filter.
+    /// Applied before `limit`, so a scoped listing is not truncated by
+    /// episodes it was never going to return.
+    pub tags: Vec<String>,
 }
 
 impl Store {
@@ -160,6 +164,13 @@ impl Store {
                 continue;
             }
             if !opts.include_expired && ep.expired_at.is_some_and(|expired| expired <= now) {
+                continue;
+            }
+            if !opts
+                .tags
+                .iter()
+                .all(|want| ep.tags.iter().any(|have| have == want))
+            {
                 continue;
             }
             out.push(ep);

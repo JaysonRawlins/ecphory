@@ -253,6 +253,7 @@ impl Ecphory {
                         include_deleted: true,
                         include_expired: true,
                         limit: 0,
+                        ..Default::default()
                     })?
                     .iter(),
             )?;
@@ -368,6 +369,7 @@ impl Ecphory {
             include_deleted: true,
             include_expired: true,
             limit: 0,
+            ..Default::default()
         })
     }
 
@@ -450,6 +452,7 @@ impl Ecphory {
             include_deleted: true,
             include_expired: true,
             limit: 0,
+            ..Default::default()
         })?;
         self.index.rebuild(all.iter())
     }
