@@ -106,6 +106,30 @@ secrets, rewrite the mirror history with
 force-push any remotes that carried it, and rotate the leaked credentials
 anyway — assume anything that ever reached a remote was read.
 
+## Subject index
+
+Reachable is not the same as findable. Claude Code injects a per-project
+`MEMORY.md` of search keys, and that index is what makes recall happen — an
+agent holding it knows *what to ask for*. Codex, agy and OpenCode read
+`AGENTS.md`, get the same MCP access and none of the index, so on the same
+repo they start behind.
+
+`ecphory render-index` renders a workspace's keys — query phrase, tags,
+description, episode id, never episode bodies — into both files, inside a
+marked region that leaves hand-written content alone:
+
+```sh
+ecphory workspace-key          # ws:-Users-me-code-myrepo — tag episodes with this
+ecphory render-index           # writes AGENTS.md + Claude's MEMORY.md
+ecphory render-index --check   # exit 1 if a target is stale
+```
+
+The workspace key is the git toplevel, resolved through `--git-common-dir` so
+a linked worktree and its main checkout share one index. Rendering is
+deterministic and reads the daemon over HTTP, so it is safe to hang off a
+[post-write trigger](docs/triggers.md). See
+[docs/subject-index.md](docs/subject-index.md).
+
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (static musl — arm64,

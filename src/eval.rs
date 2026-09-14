@@ -323,7 +323,7 @@ pub struct HealEntry {
     pub displaced_used: Vec<String>,
 }
 
-fn url_encode(s: &str) -> String {
+pub(crate) fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
         match byte {

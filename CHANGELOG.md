@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- subject index: `ecphory render-index` writes a workspace's recall keys into `AGENTS.md` (the file codex, agy and OpenCode read) and Claude Code's per-project `MEMORY.md`, inside an idempotent marked region; `ecphory workspace-key` prints the `ws:<slug>` tag that scopes an episode to a workspace; `GET /memory/episodes?tags=` filters a listing (#24)
+
 ## [0.3.6](https://github.com/JaysonRawlins/ecphory/compare/v0.3.5...v0.3.6) - 2026-09-14
 
 ### Added
