@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- the search index is now keyed on the database file (`<db>.index`) instead of its parent directory, so two stores in one directory no longer share one index — which failed with "Failed to acquire Lockfile: LockBusy" on the second open. The index directory records the id of the store that built it and is rebuilt if it names another. An existing `index/` directory is adopted automatically when it sits beside exactly one store; beside two it is left alone and can be deleted once each store has rebuilt ([#29](https://github.com/JaysonRawlins/ecphory/issues/29))
 - `heals`, `ratings`, `search-log` and `access-log` read through the daemon when one is running instead of dying on redb's process-exclusive lock; `--url` is now a global flag and each read reports its source on stderr ([#15](https://github.com/JaysonRawlins/ecphory/issues/15))
 - keep `used_episode_ids` as telemetry instead of self-correction targets
 

@@ -14,6 +14,9 @@ use crate::store::{ListOptions, Store};
 /// CORRECTION_K counts as retrievable (matches the eval's default k).
 const CORRECTION_K: usize = 5;
 
+/// Filename of the index directory's identity stamp (see `index_dir_for`).
+const INDEX_STAMP: &str = ".ecphory-index.json";
+
 /// Phrase-count ceiling per episode. search_phrases are boosted 2x, so
 /// unbounded miss-driven accumulation turns a much-missed episode into
 /// lexical mass that crowds out its siblings.
@@ -110,8 +113,122 @@ fn hidden_groups_from_env() -> Vec<String> {
         .collect()
 }
 
+/// The index directory for a store: `<db_dir>/<db_stem>.index`.
+///
+/// Keyed on the database FILE, not its parent: the pre-#29 `<db_dir>/index`
+/// gave every `.redb` file in one directory the same index, which is a
+/// LockBusy on the second open and, if the lock ever misses, one index
+/// answering for two unrelated stores.
+pub fn index_dir_for(db_path: &Path) -> PathBuf {
+    let stem = db_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ecphory".to_string());
+    dir_of(db_path).join(format!("{stem}.index"))
+}
+
+/// The directory a path sits in. A bare filename has an EMPTY parent, not
+/// none, and `read_dir("")` fails — so both callers go through this.
+fn dir_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+/// What the index directory says about who built it.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct IndexStamp {
+    store_id: String,
+    /// Diagnostics only — never compared. A store keeps its id across a move,
+    /// and an index that moved with it is still its own.
+    db: String,
+    stamped_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Take over a pre-#29 `<db_dir>/index` when it can only have belonged to
+/// this store. With a second `.redb` beside it the legacy index cannot be
+/// attributed to either, so it is left where it is — guessing is the bug this
+/// whole change exists to remove.
+fn adopt_legacy_index_dir(db_path: &Path, index_dir: &Path) {
+    if index_dir.exists() {
+        return;
+    }
+    let parent = dir_of(db_path);
+    let legacy = parent.join("index");
+    if !legacy.is_dir() {
+        return;
+    }
+    let stores = match std::fs::read_dir(parent) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "redb"))
+            .count(),
+        Err(e) => {
+            tracing::warn!("reading {}: {e}", parent.display());
+            return;
+        }
+    };
+    if stores != 1 {
+        tracing::warn!(
+            "{} holds {stores} stores and a legacy index dir ({}); it is not used any more \
+             and can be deleted once every store has rebuilt",
+            parent.display(),
+            legacy.display()
+        );
+        return;
+    }
+    match std::fs::rename(&legacy, index_dir) {
+        Ok(()) => tracing::info!(
+            "adopted legacy index {} as {} for {}",
+            legacy.display(),
+            index_dir.display(),
+            db_path.display()
+        ),
+        // Never fatal: the index is derived, so the worst case is a rebuild.
+        Err(e) => tracing::warn!("leaving legacy index {}: {e}", legacy.display()),
+    }
+}
+
+/// Bind the index directory to this store, and wipe it if it names another.
+///
+/// A mismatch means the store that built this index is gone — typically its
+/// file was deleted and recreated under the same name. The index is derived
+/// data (see `SearchIndex`), so the store wins and the index is rebuilt,
+/// loudly; refusing to open would turn a self-healing case into a daemon that
+/// will not start.
+fn bind_index_dir(db_path: &Path, index_dir: &Path, store_id: uuid::Uuid) -> Result<()> {
+    let stamp_path = index_dir.join(INDEX_STAMP);
+    let mine = store_id.to_string();
+    let owner = std::fs::read_to_string(&stamp_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<IndexStamp>(&raw).ok())
+        .map(|stamp| stamp.store_id);
+    if let Some(owner) = &owner {
+        if owner == &mine {
+            return Ok(());
+        }
+        tracing::warn!(
+            "index {} was built by store {owner}, not {mine}; wiping it for a rebuild",
+            index_dir.display()
+        );
+        std::fs::remove_dir_all(index_dir)
+            .map_err(|e| Error::Storage(format!("wiping foreign index dir: {e}")))?;
+    }
+    std::fs::create_dir_all(index_dir)
+        .map_err(|e| Error::Storage(format!("creating index dir: {e}")))?;
+    let stamp = IndexStamp {
+        store_id: mine,
+        db: db_path.display().to_string(),
+        stamped_at: chrono::Utc::now(),
+    };
+    std::fs::write(&stamp_path, serde_json::to_vec_pretty(&stamp)?)
+        .map_err(|e| Error::Storage(format!("stamping index dir: {e}")))?;
+    Ok(())
+}
+
 impl Ecphory {
-    /// The index lives beside the database file: <db_dir>/index/.
+    /// The index lives beside the database file: <db_dir>/<db_stem>.index/.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with(db_path, recorder::recording_enabled())
     }
@@ -120,12 +237,11 @@ impl Ecphory {
     /// their own config). `open` reads ECPHORY_SEARCH_LOG.
     pub fn open_with(db_path: impl AsRef<Path>, recording: bool) -> Result<Self> {
         let store = Store::open(&db_path)?;
-        let index_dir: PathBuf = db_path
-            .as_ref()
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("index");
-        let mut index = SearchIndex::open(index_dir)?;
+        let db_path = db_path.as_ref();
+        let index_dir = index_dir_for(db_path);
+        adopt_legacy_index_dir(db_path, &index_dir);
+        bind_index_dir(db_path, &index_dir, store.store_id())?;
+        let mut index = SearchIndex::open(&index_dir)?;
 
         // Cold-start convergence: an empty index with a non-empty store means
         // the index dir is new (or was deleted for recovery) — rebuild now so
@@ -1787,6 +1903,127 @@ mod tests {
         assert!(marker.exists(), "update did not fire the trigger");
     }
 
+    /// #29: the index directory was derived from the db's PARENT, so every
+    /// .redb file in one directory shared one index — a LockBusy on the second
+    /// open, and one index's contents for two unrelated stores.
+    #[test]
+    fn two_stores_in_one_directory_get_separate_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = Ecphory::open(dir.path().join("a.redb")).unwrap();
+        a.insert(&ep("aardvarks graze the northern plain")).unwrap();
+        // Pre-fix this open failed: "creating index writer: Failed to acquire
+        // Lockfile: LockBusy", because a's writer held the shared index.
+        let mut b = Ecphory::open(dir.path().join("b.redb")).unwrap();
+        b.insert(&ep("bison graze the northern plain")).unwrap();
+
+        let opts = SearchOptions::default();
+        assert_eq!(a.search("aardvarks", &opts).unwrap().results.len(), 1);
+        assert_eq!(b.search("bison", &opts).unwrap().results.len(), 1);
+        assert!(
+            b.search("aardvarks", &opts).unwrap().results.is_empty(),
+            "b must not see a's episodes"
+        );
+        assert!(
+            a.search("bison", &opts).unwrap().results.is_empty(),
+            "a must not see b's episodes"
+        );
+        assert!(dir.path().join("a.index").is_dir());
+        assert!(dir.path().join("b.index").is_dir());
+    }
+
+    #[test]
+    fn index_dir_is_named_for_the_store_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _svc = Ecphory::open(dir.path().join("alpha.redb")).unwrap();
+        assert!(dir.path().join("alpha.index").is_dir());
+        assert!(
+            !dir.path().join("index").exists(),
+            "the parent-keyed layout is what #29 is about"
+        );
+    }
+
+    /// The pre-#29 layout on disk: one store, its index at <dir>/index. The
+    /// new binary must take it over rather than leave it as litter.
+    #[test]
+    fn legacy_index_dir_is_adopted_when_it_is_unambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ecphory.redb");
+        {
+            let mut svc = Ecphory::open(&db).unwrap();
+            svc.insert(&ep("persistent pelicans")).unwrap();
+        }
+        std::fs::rename(dir.path().join("ecphory.index"), dir.path().join("index")).unwrap();
+
+        let svc = Ecphory::open(&db).unwrap();
+        assert!(
+            !dir.path().join("index").exists(),
+            "legacy dir should be adopted, not left behind"
+        );
+        assert!(dir.path().join("ecphory.index").is_dir());
+        assert_eq!(
+            svc.search("pelicans", &SearchOptions::default())
+                .unwrap()
+                .results
+                .len(),
+            1
+        );
+    }
+
+    /// A legacy index beside two stores can only have belonged to one of them,
+    /// and guessing which is exactly the bug this change removes.
+    #[test]
+    fn legacy_index_dir_is_left_alone_beside_two_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_db = dir.path().join("a.redb");
+        {
+            let mut a = Ecphory::open(&a_db).unwrap();
+            a.insert(&ep("aardvarks graze the northern plain")).unwrap();
+            let _b = Ecphory::open(dir.path().join("b.redb")).unwrap();
+        }
+        std::fs::rename(dir.path().join("a.index"), dir.path().join("index")).unwrap();
+
+        let a = Ecphory::open(&a_db).unwrap();
+        assert!(
+            dir.path().join("index").is_dir(),
+            "an unattributable legacy index must be left where it is"
+        );
+        assert!(dir.path().join("a.index").is_dir());
+        assert_eq!(
+            a.search("aardvarks", &SearchOptions::default())
+                .unwrap()
+                .results
+                .len(),
+            1,
+            "a rebuilds from its own store"
+        );
+    }
+
+    /// The store file was deleted and recreated under the same name, so the
+    /// index dir beside it belongs to a store that no longer exists.
+    #[test]
+    fn an_index_built_by_another_store_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ecphory.redb");
+        {
+            let mut svc = Ecphory::open(&db).unwrap();
+            svc.insert(&ep("persistent pelicans")).unwrap();
+        }
+        let stamp = dir.path().join("ecphory.index").join(INDEX_STAMP);
+        let before = std::fs::read_to_string(&stamp).expect("index dir records its store");
+        std::fs::remove_file(&db).unwrap();
+
+        let mut svc = Ecphory::open(&db).unwrap();
+        svc.insert(&ep("cormorants dry their wings")).unwrap();
+        let opts = SearchOptions::default();
+        assert!(
+            svc.search("pelicans", &opts).unwrap().results.is_empty(),
+            "the previous store's index must not answer for this one"
+        );
+        assert_eq!(svc.search("cormorants", &opts).unwrap().results.len(), 1);
+        let after = std::fs::read_to_string(&stamp).unwrap();
+        assert_ne!(before, after, "the stamp must name the store that owns it");
+    }
+
     #[test]
     fn reopen_rebuilds_missing_index() {
         let dir = tempfile::tempdir().unwrap();
@@ -1797,7 +2034,7 @@ mod tests {
             svc.insert(&e).unwrap();
         }
         // Simulate index loss (recovery path): delete the index dir entirely.
-        std::fs::remove_dir_all(dir.path().join("index")).unwrap();
+        std::fs::remove_dir_all(dir.path().join("test.index")).unwrap();
         let svc = Ecphory::open(&db).unwrap();
         let out = svc.search("pelicans", &SearchOptions::default()).unwrap();
         assert_eq!(
