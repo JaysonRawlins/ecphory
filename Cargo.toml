@@ -1,6 +1,6 @@
 [package]
 name = "ecphory"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 description = "Recall, measured. A single-binary, lexical-first memory store for AI agents."
 license = "MIT"
