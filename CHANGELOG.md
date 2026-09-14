@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/JaysonRawlins/ecphory/compare/v0.3.5...v0.3.6) - 2026-09-14
+
+### Added
+
+- *(search)* hidden groups are skipped by unscoped search ([#23](https://github.com/JaysonRawlins/ecphory/pull/23))
+- offsite mirror — auto-push to a git remote and an export trigger event ([#21](https://github.com/JaysonRawlins/ecphory/pull/21))
+- post-write triggers — run a local command when a matching episode changes ([#20](https://github.com/JaysonRawlins/ecphory/pull/20))
+
+### Fixed
+
+- *(index)* key the search index on the database file, not its directory ([#31](https://github.com/JaysonRawlins/ecphory/pull/31))
+- *(cli)* read recorder log views through the daemon instead of the store ([#27](https://github.com/JaysonRawlins/ecphory/pull/27))
+- separate rating telemetry and add version rollback
+
+### Other
+
+- *(openspec)* archive per-store-index ([#33](https://github.com/JaysonRawlins/ecphory/pull/33))
+- self-correction walkthrough, heal-cycle gif, and the deploy skills ([#32](https://github.com/JaysonRawlins/ecphory/pull/32))
+- *(openspec)* archive daemon-first-log-views ([#28](https://github.com/JaysonRawlins/ecphory/pull/28))
+- *(openspec)* archive the two shipped changes, backfill the triggers spec ([#26](https://github.com/JaysonRawlins/ecphory/pull/26))
+- offsite-mirror verify task complete — reference deployment pushing
+- openspec draft — seed-principles-pack distribution change
+
 ### Added
 
 - hidden groups: `ECPHORY_HIDDEN_GROUPS` lists groups an unscoped search skips; naming the group in `group_id` opts back in; `/status` reports the set (#22)
