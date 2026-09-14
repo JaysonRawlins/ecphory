@@ -27,9 +27,15 @@ const RATING_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("rating_lo
 /// recorder retention prune: every healed miss is a permanent regression
 /// test (the entry carries its own query for exactly this reason).
 const RESOLUTION_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("resolution_log");
+/// Store-level scalars. Currently just `store_id` — the identity a derived
+/// artifact (the tantivy index) records so it can tell whose it is. Path is
+/// not identity: a store keeps its id when it is moved or renamed.
+const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const STORE_ID_KEY: &str = "store_id";
 
 pub struct Store {
     db: Database,
+    store_id: Uuid,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -49,16 +55,36 @@ impl Store {
         let db = Database::create(path)?;
         // Create tables eagerly so first reads don't race first writes.
         let tx = db.begin_write()?;
-        {
+        let store_id = {
             tx.open_table(EPISODES)?;
             tx.open_table(VERSIONS)?;
             tx.open_table(SEARCH_LOG)?;
             tx.open_table(ACCESS_LOG)?;
             tx.open_table(RATING_LOG)?;
             tx.open_table(RESOLUTION_LOG)?;
-        }
+            let mut meta = tx.open_table(META)?;
+            // Minted once, on the first open of a store — including an
+            // existing store opened by a version that knows about ids.
+            let existing = meta
+                .get(STORE_ID_KEY)?
+                .map(|guard| String::from_utf8_lossy(guard.value()).trim().to_string());
+            match existing {
+                Some(raw) => Uuid::parse_str(&raw)
+                    .map_err(|e| Error::Storage(format!("bad store_id {raw}: {e}")))?,
+                None => {
+                    let id = Uuid::now_v7();
+                    meta.insert(STORE_ID_KEY, id.to_string().as_bytes())?;
+                    id
+                }
+            }
+        };
         tx.commit()?;
-        Ok(Self { db })
+        Ok(Self { db, store_id })
+    }
+
+    /// This store's durable id. Stable across opens, moves and renames.
+    pub fn store_id(&self) -> Uuid {
+        self.store_id
     }
 
     pub fn insert(&self, episode: &Episode) -> Result<()> {
@@ -518,6 +544,19 @@ mod tests {
 
     fn sample(content: &str) -> Episode {
         Episode::new(content, "test")
+    }
+
+    #[test]
+    fn store_id_is_minted_once_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.redb");
+        let first = Store::open(&db).unwrap().store_id();
+        let second = Store::open(&db).unwrap().store_id();
+        assert_eq!(first, second, "a store keeps its id across opens");
+        let other = Store::open(dir.path().join("other.redb"))
+            .unwrap()
+            .store_id();
+        assert_ne!(first, other, "separate stores are separately identified");
     }
 
     #[test]
