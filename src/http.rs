@@ -315,6 +315,12 @@ struct UpdateBody {
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
+    source: String,
+    #[serde(default)]
+    source_model: String,
+    #[serde(default)]
+    source_description: String,
+    #[serde(default)]
     metadata: serde_json::Value,
 }
 
@@ -339,6 +345,9 @@ async fn update_episode(
             } else {
                 Some(body.tags)
             },
+            source: none_if_empty(body.source),
+            source_model: none_if_empty(body.source_model),
+            source_description: none_if_empty(body.source_description),
             expired_at: None,
             metadata: if body.metadata.is_null() {
                 None
@@ -655,6 +664,15 @@ mod tests {
             .unwrap()
     }
 
+    fn put(base: &str, path: &str, body: serde_json::Value) -> serde_json::Value {
+        ureq::put(format!("{base}{path}"))
+            .send_json(body)
+            .unwrap_or_else(|e| panic!("PUT {path}: {e}"))
+            .body_mut()
+            .read_json()
+            .unwrap()
+    }
+
     fn add(base: &str, content: &str) -> String {
         let resp = post(base, "/api/v1/memory", json!({"content": content}));
         resp["episode"]["id"].as_str().unwrap().to_string()
@@ -945,5 +963,93 @@ mod tests {
             "tag filter did not scope the listing: {scoped}"
         );
         assert_eq!(scoped["episodes"][0]["content"].as_str().unwrap(), "mine");
+    }
+    // ---- provenance is correctable after the fact (issue #39) -------------
+    //
+    // `source`, `source_model` and `source_description` were settable at write
+    // time and unreachable afterwards, so a bad value was permanent for the
+    // life of the episode. This drives the real repair over the real PUT with
+    // the corruption the issue was filed for: an Opus 4.6/4.7-era agent closed
+    // the `source` tag inside the value and the store took it verbatim, as
+    // designed. The intended values are recoverable from the text, so the fix
+    // must be an update, not a delete-and-re-add that mints a new id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn update_repairs_a_mangled_source_without_minting_a_new_id() {
+        let (base, _dir) = spawn_server().await;
+        let mangled = "claude-code</source>\n<parameter name=\"source_model\">opus-4.7";
+
+        let created = post(
+            &base,
+            "/api/v1/memory",
+            json!({
+                "content": "balcony security hub wiring notes",
+                "source": mangled,
+                "source_description": "leaked prose</source_description>",
+            }),
+        );
+        let id = created["episode"]["id"].as_str().unwrap().to_string();
+        assert_eq!(created["episode"]["source"].as_str().unwrap(), mangled);
+
+        let updated = put(
+            &base,
+            &format!("/api/v1/memory/episodes/{id}"),
+            json!({
+                "source": "claude-code",
+                "source_model": "opus-4.7",
+                "source_description": "captured by the coding agent",
+            }),
+        );
+        assert_eq!(
+            updated["source"].as_str().unwrap(),
+            "claude-code",
+            "source must be correctable: {updated}"
+        );
+        assert_eq!(updated["source_model"].as_str().unwrap(), "opus-4.7");
+        assert_eq!(
+            updated["source_description"].as_str().unwrap(),
+            "captured by the coding agent"
+        );
+
+        // The id is the whole point: wikilinks, index rows and the access log
+        // all reference it, which is why delete-and-re-add was not the cure.
+        assert_eq!(updated["id"].as_str().unwrap(), id);
+        assert_eq!(
+            updated["content"].as_str().unwrap(),
+            "balcony security hub wiring notes",
+            "an update naming only provenance must leave content alone"
+        );
+
+        // The converse guarantee: an update that does not name provenance must
+        // not blank it. Every field here is "empty means leave unchanged", so
+        // the absent `source` must not reach the store as "".
+        let after_content_edit = put(
+            &base,
+            &format!("/api/v1/memory/episodes/{id}"),
+            json!({"content": "balcony security hub wiring notes, revised"}),
+        );
+        assert_eq!(
+            after_content_edit["source"].as_str().unwrap(),
+            "claude-code",
+            "a content-only update wiped provenance: {after_content_edit}"
+        );
+        assert_eq!(
+            after_content_edit["source_model"].as_str().unwrap(),
+            "opus-4.7"
+        );
+        assert_eq!(
+            after_content_edit["source_description"].as_str().unwrap(),
+            "captured by the coding agent"
+        );
+
+        // And the mangled value is still recoverable, like every other update.
+        let versions = get(&base, &format!("/api/v1/memory/episodes/{id}/versions"));
+        assert_eq!(versions["count"], json!(2));
+        assert_eq!(
+            versions["versions"][0]["episode"]["source"]
+                .as_str()
+                .unwrap(),
+            mangled,
+            "the prior provenance must be archived, not discarded"
+        );
     }
 }

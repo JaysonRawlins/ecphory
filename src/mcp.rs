@@ -169,6 +169,16 @@ pub struct UpdateEpisodeRequest {
     /// Replacement tags; empty means leave unchanged.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Corrected originating system, e.g. "claude-code"; empty means leave
+    /// unchanged.
+    #[serde(default)]
+    pub source: String,
+    /// Corrected capturing model; empty means leave unchanged.
+    #[serde(default)]
+    pub source_model: String,
+    /// Corrected source description; empty means leave unchanged.
+    #[serde(default)]
+    pub source_description: String,
     /// Replacement metadata; JSON null means leave unchanged.
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -332,7 +342,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update an episode's fields. The prior state is archived and recoverable."
+        description = "Update an episode's fields, provenance (source, source_model, source_description) included, so a value written wrong stays correctable. The prior state is archived and recoverable."
     )]
     fn update_episode(
         &self,
@@ -347,6 +357,9 @@ impl McpServer {
                     name: opt_str(req.name),
                     search_phrases: opt_vec(req.search_phrases),
                     tags: opt_vec(req.tags),
+                    source: opt_str(req.source),
+                    source_model: opt_str(req.source_model),
+                    source_description: opt_str(req.source_description),
                     expired_at: None,
                     metadata: if req.metadata.is_null() {
                         None

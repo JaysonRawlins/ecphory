@@ -72,6 +72,13 @@ pub struct UpdateParams {
     pub content: Option<String>,
     pub search_phrases: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
+    /// Provenance. Correctable after the fact because a capturing agent can
+    /// write a mangled value and the store takes it verbatim by design — see
+    /// issue #39, where a serialization quirk baked a closing tag into 26
+    /// episodes' `source` with no way back.
+    pub source: Option<String>,
+    pub source_model: Option<String>,
+    pub source_description: Option<String>,
     pub expired_at: Option<DateTime<Utc>>,
     pub metadata: Option<serde_json::Value>,
 }
