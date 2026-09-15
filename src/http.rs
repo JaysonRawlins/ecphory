@@ -469,10 +469,12 @@ struct RateSearchBody {
     search_id: String,
     /// "hit" | "partial" | "miss"
     rating: String,
+    /// Consumption telemetry: recorded, and never edited by any rating.
     #[serde(default)]
     used_episode_ids: Vec<String>,
-    /// Miss/partial ground truth: episodes that should have surfaced.
-    /// Triggers self-correction (enrich → redo → validate) per target.
+    /// Miss/partial ground truth: episodes that should have surfaced. The
+    /// only field that mutates an episode — triggers self-correction
+    /// (enrich → redo → validate) per target.
     #[serde(default)]
     intended_episode_ids: Vec<String>,
     #[serde(default)]
@@ -815,6 +817,131 @@ mod tests {
         // The original miss stays healed ground truth — replays never
         // rewrite the rating layer.
         assert_eq!(stats["rated_miss_healed"], json!(1));
+    }
+
+    // ---- the signal and the lever share one call (issue #18) ----------------
+    //
+    // `used_episode_ids` is consumption telemetry and `intended_episode_ids`
+    // is the heal lever; only the lever mutates. Inferring a target from usage
+    // is the same mistake `self_correct` already refuses to make from access
+    // joins — enriching a wrongly-guessed target buries the right one behind
+    // it — so it must not sneak back in at the wire, which is where the live
+    // incident came through: a `partial` carrying used ids only, and an
+    // episode enriched with a query about something else entirely.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn used_ids_are_telemetry_over_the_wire_even_on_a_partial() {
+        let (base, _dir) = spawn_server().await;
+
+        // An empty `corrections` is skipped on the wire, so absent and `[]`
+        // are the same answer: nothing was mutated.
+        let corrections = |rated: &serde_json::Value| -> Vec<serde_json::Value> {
+            rated["rating"]["corrections"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        let phrases = |id: &str| -> Vec<String> {
+            let ep = get(
+                &base,
+                &format!("/api/v1/memory/episodes/{id}?no_record=true"),
+            );
+            ep.get("search_phrases")
+                .and_then(|p| p.as_array())
+                .map(|a| a.iter().map(|p| p.as_str().unwrap().to_string()).collect())
+                .unwrap_or_default()
+        };
+
+        // The rig puts the used episode where a union would actually damage
+        // it: outside the correction window (k = 5) but inside the returned
+        // page (limit = 10). That is a textbook partial — something useful
+        // came back, badly ranked — and it is the one position where
+        // self-correction enriches rather than shrugging `already_ranks`.
+        for pad in [
+            "",
+            "with notes on unrelated calibration steps",
+            "with notes on unrelated calibration steps and a tail of miscellaneous \
+             observations",
+            "with notes on unrelated calibration steps and a tail of miscellaneous \
+             observations gathered over several sessions",
+            "with notes on unrelated calibration steps and a tail of miscellaneous \
+             observations gathered over several sessions plus appendices",
+        ] {
+            add(&base, &format!("quartz crystal resonance {pad}"));
+        }
+        let relied_on = add(
+            &base,
+            "quartz crystal resonance with notes on unrelated calibration steps and a \
+             tail of miscellaneous observations gathered over several sessions plus \
+             appendices nobody reads and a glossary nobody maintains",
+        );
+        let better = add(&base, "piezoelectric oscillator drift on the bench meter");
+
+        let out = search(&base, "quartz crystal resonance");
+        let rank_of = |out: &serde_json::Value, id: &str| -> Option<u64> {
+            out["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["episode"]["id"] == json!(id))
+                .map(|r| r["rank"].as_u64().unwrap())
+        };
+        assert_eq!(
+            rank_of(&out, &relied_on),
+            Some(6),
+            "the rig must land the used episode outside the correction window"
+        );
+        assert_eq!(rank_of(&out, &better), None, "the better answer must miss");
+
+        let rated = post(
+            &base,
+            "/api/v1/memory/search-rating",
+            json!({
+                "search_id": out["search_id"],
+                "rating": "partial",
+                "used_episode_ids": [relied_on],
+            }),
+        );
+        assert!(
+            corrections(&rated).is_empty(),
+            "a used id is not a heal target, got {}",
+            rated["rating"]["corrections"]
+        );
+        assert!(
+            phrases(&relied_on).is_empty(),
+            "rating a result used must never append to its search_phrases"
+        );
+
+        // Telemetry still lands: the signal is kept, it just does not mutate.
+        let log = get(&base, "/api/v1/memory/rating-log?limit=10");
+        assert_eq!(log["ratings"][0]["used_episode_ids"], json!([relied_on]));
+
+        // Both fields in one body — the shape a client actually sends once it
+        // knows what it should have found. Exactly one episode changes.
+        let out = search(&base, "quartz crystal resonance");
+        let rated = post(
+            &base,
+            "/api/v1/memory/search-rating",
+            json!({
+                "search_id": out["search_id"],
+                "rating": "partial",
+                "used_episode_ids": [relied_on],
+                "intended_episode_ids": [better],
+            }),
+        );
+        let applied = corrections(&rated);
+        assert_eq!(applied.len(), 1, "one target, one correction");
+        assert_eq!(applied[0]["episode_id"], json!(better));
+        assert_eq!(applied[0]["action"], json!("enriched"));
+        assert_eq!(
+            phrases(&better),
+            vec!["quartz crystal resonance".to_string()]
+        );
+        assert!(
+            phrases(&relied_on).is_empty(),
+            "the used id stayed telemetry even alongside a real target"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
