@@ -64,7 +64,7 @@ impl SearchIndex {
         // Self-healing on schema change: the index is derived data, so a
         // mismatch (e.g. tokenizer upgrade) wipes and rebuilds instead of
         // migrating. The store is the source of truth; the service layer
-        // reindexes when it finds an empty index over a non-empty store.
+        // reindexes when the document count disagrees with it (converge_index).
         let index = match Index::open_or_create(mmap, schema.clone()) {
             Ok(index) => index,
             Err(open_err) => {
@@ -140,6 +140,18 @@ impl SearchIndex {
             .search(&query, &tantivy::collector::Count)
             .map_err(|e| Error::Storage(format!("id lookup: {e}")))?;
         Ok(count > 0)
+    }
+
+    /// How many documents the committed index holds. The honest answer to
+    /// "is this index converged with the store?": `search` cannot be asked,
+    /// because queries are plain text (see `plain_text_query`), so a wildcard
+    /// tokenizes to nothing and matches nothing on every index, empty or not.
+    pub fn num_docs(&self) -> Result<u64> {
+        let reader = self
+            .index
+            .reader()
+            .map_err(|e| Error::Storage(format!("index reader: {e}")))?;
+        Ok(reader.searcher().num_docs())
     }
 
     pub fn commit(&mut self) -> Result<()> {
@@ -327,6 +339,51 @@ mod tests {
         assert!(idx.search("", 5, false).unwrap().is_empty());
         assert!(idx.search("   ", 5, false).unwrap().is_empty());
         assert!(idx.search("--- ::: !!!", 5, false).unwrap().is_empty());
+    }
+
+    /// #30: `search` was used as an emptiness probe. It cannot be — queries
+    /// are plain text, so a wildcard tokenizes to zero terms and the resulting
+    /// BooleanQuery has no clauses. The probe read every index as empty.
+    #[test]
+    fn a_wildcard_query_is_not_a_probe_for_emptiness() {
+        let idx = indexed(&[ep("a", "some content")]);
+        assert!(
+            idx.search("*", 1, true).unwrap().is_empty(),
+            "'*' is a term, not syntax, and nothing is indexed under it"
+        );
+        assert_eq!(
+            idx.num_docs().unwrap(),
+            1,
+            "num_docs is the honest probe: it counts documents, not matches"
+        );
+    }
+
+    #[test]
+    fn num_docs_counts_committed_documents_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = SearchIndex::open(dir.path()).unwrap();
+        assert_eq!(idx.num_docs().unwrap(), 0);
+
+        idx.upsert(&ep("a", "alpha")).unwrap();
+        assert_eq!(
+            idx.num_docs().unwrap(),
+            0,
+            "an uncommitted write is not in the index yet"
+        );
+        idx.commit().unwrap();
+        assert_eq!(idx.num_docs().unwrap(), 1);
+
+        // A second episode (new id) adds one; upserting it twice still adds
+        // one, because upsert deletes the id's document before re-adding it.
+        let second = ep("b", "beta");
+        idx.upsert(&second).unwrap();
+        idx.upsert(&second).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.num_docs().unwrap(), 2, "upsert replaces, never doubles");
+
+        idx.remove(&second.id.to_string()).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.num_docs().unwrap(), 1);
     }
 
     #[test]

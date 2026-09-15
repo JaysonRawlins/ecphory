@@ -227,6 +227,50 @@ fn bind_index_dir(db_path: &Path, index_dir: &Path, store_id: uuid::Uuid) -> Res
     Ok(())
 }
 
+/// Every stored episode has exactly one index document — every write path
+/// goes through `Ecphory`, which upserts and commits — so the two counts agree
+/// in a healthy store. Bring them back into agreement when they do not.
+///
+/// A difference means the index directory is new (or was deleted for
+/// recovery), or one half of a write did not land: a crash between
+/// `store.insert` and `index.commit` leaves an episode nothing can find, and
+/// one between `store.purge` and the index remove leaves a dangling document.
+/// The store is the source of truth in all three cases, so it rebuilds.
+///
+/// Both sides are O(1) — redb's table length and tantivy's committed doc count
+/// — so this is free to ask on every open. Before #30 the question was asked
+/// as `index.search("*")`, which tokenizes to nothing and so read EVERY index
+/// as empty: every open of a non-empty store, `search` included, reindexed it
+/// wholesale.
+///
+/// What a count cannot see is drift that preserves it: an update whose store
+/// write landed and whose index upsert did not leaves one stale document where
+/// one fresh one belongs. Nothing detects that automatically; `reindex` is the
+/// repair, and a rebuild here is logged loudly because after this change it is
+/// a signal that something went wrong rather than the sound of every open.
+///
+/// Returns the number of episodes reindexed, or None when nothing needed
+/// doing.
+fn converge_index(store: &Store, index: &mut SearchIndex) -> Result<Option<usize>> {
+    let stored = store.count()?;
+    let indexed = index.num_docs()?;
+    if stored == indexed {
+        return Ok(None);
+    }
+    if indexed == 0 {
+        tracing::info!("index is empty over {stored} episodes; building it");
+    } else {
+        tracing::warn!("index holds {indexed} documents for {stored} stored episodes; rebuilding");
+    }
+    let all = store.list(ListOptions {
+        include_deleted: true,
+        include_expired: true,
+        limit: 0,
+        ..Default::default()
+    })?;
+    Ok(Some(index.rebuild(all.iter())?))
+}
+
 impl Ecphory {
     /// The index lives beside the database file: <db_dir>/<db_stem>.index/.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
@@ -243,21 +287,7 @@ impl Ecphory {
         bind_index_dir(db_path, &index_dir, store.store_id())?;
         let mut index = SearchIndex::open(&index_dir)?;
 
-        // Cold-start convergence: an empty index with a non-empty store means
-        // the index dir is new (or was deleted for recovery) — rebuild now so
-        // search is never silently empty. (FTS warm-start lesson from engram.)
-        if store.count()? > 0 && index.search("*", 1, true)?.is_empty() {
-            index.rebuild(
-                store
-                    .list(ListOptions {
-                        include_deleted: true,
-                        include_expired: true,
-                        limit: 0,
-                        ..Default::default()
-                    })?
-                    .iter(),
-            )?;
-        }
+        converge_index(&store, &mut index)?;
 
         // Recorder maintenance at open: prune past retention. Never fatal.
         let cutoff = chrono::Utc::now() - chrono::Duration::days(recorder::retention_days());
@@ -445,6 +475,13 @@ impl Ecphory {
 
     pub fn count(&self) -> Result<u64> {
         self.store.count()
+    }
+
+    /// Documents in the committed search index. Equal to `count` for any open
+    /// store — `converge_index` made it so — which is exactly why `status`
+    /// prints it: it is how you see that the index is populated at all.
+    pub fn indexed_count(&self) -> Result<u64> {
+        self.index.num_docs()
     }
 
     pub fn reindex(&mut self) -> Result<usize> {
@@ -2025,6 +2062,135 @@ mod tests {
         assert_eq!(svc.search("cormorants", &opts).unwrap().results.len(), 1);
         let after = std::fs::read_to_string(&stamp).unwrap();
         assert_ne!(before, after, "the stamp must name the store that owns it");
+    }
+
+    /// The tantivy commit counter, read straight off the index directory's
+    /// meta.json. A rebuild commits, so this number moves; a clean open must
+    /// leave it exactly where it was. This is the issue's own evidence
+    /// ("committing 5" / "committing 7" on two consecutive opens) as an
+    /// assertion.
+    fn index_opstamp(index_dir: &Path) -> u64 {
+        let raw = std::fs::read_to_string(index_dir.join("meta.json")).expect("index meta.json");
+        serde_json::from_str::<serde_json::Value>(&raw).expect("meta.json parses")["opstamp"]
+            .as_u64()
+            .expect("meta.json records an opstamp")
+    }
+
+    /// The bug in #30: the cold-start probe asked `search("*")`, which
+    /// tokenizes to nothing and so reads EVERY index as empty. Every open of
+    /// a non-empty store reindexed it wholesale — including `search`, a
+    /// read-only command.
+    #[test]
+    fn reopening_a_healthy_store_does_not_rebuild_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.redb");
+        let index_dir = dir.path().join("test.index");
+        {
+            let mut svc = Ecphory::open(&db).unwrap();
+            svc.insert(&ep("persistent pelicans")).unwrap();
+            svc.insert(&ep("cormorants dry their wings")).unwrap();
+        }
+        let before = index_opstamp(&index_dir);
+
+        let svc = Ecphory::open(&db).unwrap();
+        assert_eq!(
+            svc.search("pelicans", &SearchOptions::default())
+                .unwrap()
+                .results
+                .len(),
+            1,
+            "the healthy index must still answer"
+        );
+        drop(svc);
+        assert_eq!(
+            index_opstamp(&index_dir),
+            before,
+            "opening a store whose index is already converged must not commit"
+        );
+    }
+
+    /// The other half of #30: with the probe made honest, nothing rebuilds an
+    /// index that is non-empty but WRONG. A store write that never reached the
+    /// index (crash between the two commits) is the case the accidental
+    /// rebuild was silently repairing, so the convergence check compares
+    /// counts rather than asking whether the index is empty.
+    #[test]
+    fn a_store_write_that_missed_the_index_is_repaired_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.redb");
+        {
+            let mut svc = Ecphory::open(&db).unwrap();
+            svc.insert(&ep("persistent pelicans")).unwrap();
+        }
+        // Store-only write: exactly what a crash between `store.insert` and
+        // `index.commit` leaves behind.
+        {
+            let store = Store::open(&db).unwrap();
+            store.insert(&ep("cormorants dry their wings")).unwrap();
+        }
+
+        let svc = Ecphory::open(&db).unwrap();
+        let opts = SearchOptions::default();
+        assert_eq!(
+            svc.search("cormorants", &opts).unwrap().results.len(),
+            1,
+            "an episode missing from the index must be reindexed at open"
+        );
+        assert_eq!(svc.search("pelicans", &opts).unwrap().results.len(), 1);
+    }
+
+    /// The mirror case: a purge that reached the store but not the index
+    /// leaves a dangling document. Search already tolerates it (the store join
+    /// drops it), but the counts disagree, so open repairs it.
+    #[test]
+    fn a_purge_that_missed_the_index_is_repaired_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.redb");
+        let doomed = ep("cormorants dry their wings");
+        {
+            let mut svc = Ecphory::open(&db).unwrap();
+            svc.insert(&ep("persistent pelicans")).unwrap();
+            svc.insert(&doomed).unwrap();
+        }
+        {
+            let store = Store::open(&db).unwrap();
+            store.demote(&doomed.id.to_string()).unwrap();
+            store.purge(&doomed.id.to_string()).unwrap();
+        }
+
+        let svc = Ecphory::open(&db).unwrap();
+        assert!(
+            !svc.index.contains(&doomed.id.to_string()).unwrap(),
+            "the dangling index document must be swept at open"
+        );
+    }
+
+    /// `converge_index` reports what it did, so the decision is observable
+    /// without reading a log: None when the counts already agree.
+    #[test]
+    fn converge_index_reports_whether_it_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.redb");
+        {
+            let mut svc = Ecphory::open(&db).unwrap();
+            svc.insert(&ep("persistent pelicans")).unwrap();
+            svc.insert(&ep("cormorants dry their wings")).unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        let mut index = SearchIndex::open(dir.path().join("test.index")).unwrap();
+        assert_eq!(
+            converge_index(&store, &mut index).unwrap(),
+            None,
+            "a converged index needs no work"
+        );
+
+        store.insert(&ep("a write the index never saw")).unwrap();
+        assert_eq!(
+            converge_index(&store, &mut index).unwrap(),
+            Some(3),
+            "a drifted index is rebuilt from every stored episode"
+        );
+        assert_eq!(converge_index(&store, &mut index).unwrap(), None);
     }
 
     #[test]
