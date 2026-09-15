@@ -197,6 +197,15 @@ impl Store {
             if let Some(tags) = params.tags.clone() {
                 ep.tags = tags;
             }
+            if let Some(source) = params.source.clone() {
+                ep.source = source;
+            }
+            if let Some(source_model) = params.source_model.clone() {
+                ep.source_model = Some(source_model);
+            }
+            if let Some(source_description) = params.source_description.clone() {
+                ep.source_description = Some(source_description);
+            }
             if let Some(expired_at) = params.expired_at {
                 ep.expired_at = Some(expired_at);
             }
@@ -660,11 +669,22 @@ mod tests {
                     content: Some("revised content".into()),
                     search_phrases: Some(vec!["revised cue".into()]),
                     tags: Some(vec!["revised".into()]),
+                    source: Some("revised-source".into()),
+                    source_model: Some("revised-model".into()),
+                    source_description: Some("revised description".into()),
                     expired_at: Some(expires),
                     metadata: Some(serde_json::json!({"state": "revised"})),
                 },
             )
             .unwrap();
+        // Provenance changes like any other field — and rolls back like one,
+        // which is what makes a bulk repair of it safe to get wrong (#39).
+        assert_eq!(revised.source, "revised-source");
+        assert_eq!(revised.source_model.as_deref(), Some("revised-model"));
+        assert_eq!(
+            revised.source_description.as_deref(),
+            Some("revised description")
+        );
         let original_version = store.versions(&original.id.to_string()).unwrap()[0].clone();
 
         let restored = store

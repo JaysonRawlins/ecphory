@@ -95,6 +95,15 @@ enum Command {
         phrases: Vec<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Correct the originating system, e.g. "claude-code"
+        #[arg(long)]
+        source: Option<String>,
+        /// Correct the capturing model
+        #[arg(long)]
+        source_model: Option<String>,
+        /// Correct the source description
+        #[arg(long)]
+        source_description: Option<String>,
     },
     /// Demote (soft-delete) an episode — recoverable via restore
     Demote { id: String },
@@ -595,6 +604,9 @@ fn main() -> anyhow::Result<()> {
             name,
             phrases,
             tags,
+            source,
+            source_model,
+            source_description,
         } => {
             let params = UpdateParams {
                 content,
@@ -605,6 +617,9 @@ fn main() -> anyhow::Result<()> {
                     Some(phrases)
                 },
                 tags: if tags.is_empty() { None } else { Some(tags) },
+                source,
+                source_model,
+                source_description,
                 ..Default::default()
             };
             let ep = svc.update(&id, params)?;
