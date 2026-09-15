@@ -130,6 +130,8 @@ pub struct RateSearchRequest {
     /// or "miss" (nothing relevant).
     pub rating: String,
     /// Episode ids (full or prefix) from the results that were actually used.
+    /// Consumption telemetry: recorded, and never edited by any rating. The
+    /// field that changes an episode is `intended_episode_ids`.
     #[serde(default)]
     pub used_episode_ids: Vec<String>,
     /// On miss/partial: episodes that SHOULD have surfaced (found later by
@@ -278,7 +280,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Rate a previous search by its search_id: was the retrieval a hit, partial, or miss? Call this after consuming search results — the moment you know whether they answered the question. Explicit ratings are the store's primary retrieval-quality signal (the query->rate->work loop); include used_episode_ids for the results you actually relied on. On a miss/partial where you later found the right episode, pass its id in intended_episode_ids: the store self-corrects (adds your failed query to that episode's search phrases, re-runs the search, validates) so the same phrasing finds it next time."
+        description = "Rate a previous search by its search_id: was the retrieval a hit, partial, or miss? Call this after consuming search results — the moment you know whether they answered the question. Explicit ratings are the store's primary retrieval-quality signal (the query->rate->work loop); include used_episode_ids for the results you actually relied on — read-only telemetry, never edited by any rating. On a miss/partial where you later found the right episode, pass its id in intended_episode_ids: that is the only field that changes an episode — the store self-corrects (adds your failed query to that episode's search phrases, re-runs the search, validates) so the same phrasing finds it next time."
     )]
     fn rate_search(
         &self,
@@ -457,10 +459,10 @@ impl ServerHandler for McpServer {
              Search accepts free text; episode ids resolve by unique prefix. \
              After consuming search results — the moment you know whether they answered the \
              question — call rate_search with the returned search_id (hit/partial/miss, plus \
-             used_episode_ids for results you relied on): query->rate->work. When a search \
-             missed and you later find the right episode another way, rate the ORIGINAL \
-             search_id as miss with intended_episode_ids=[that id] — the store self-corrects \
-             so that phrasing finds it next time. For bulk or \
+             used_episode_ids for results you relied on — signal only, never edited): \
+             query->rate->work. When a search missed and you later find the right episode \
+             another way, rate the ORIGINAL search_id as miss with intended_episode_ids=[that \
+             id] — the store self-corrects so that phrasing finds it next time. For bulk or \
              maintenance reads, pass no_record=true to get_episode so they don't pollute \
              the usage signal. Updates are versioned: get_episode_versions lists archived \
              snapshots and restore_episode_version rolls one back exactly.",

@@ -60,6 +60,14 @@ capped at 8 per episode — unbounded miss-driven growth would turn a much-misse
 episode into lexical mass that crowds out its siblings. And a collateral check
 warns when a heal displaces an episode that prior ratings marked as *used*.
 
+**Used is signal, intended is the lever.** `used_episode_ids` travels in the
+same call and is the opposite kind of thing: it is recorded, read back as the
+retrieval-quality signal, used as the protected set above — and never edited,
+on any rating. Only an id passed as *intended* can change an episode. Guessing
+a target from what merely got used is the same inference the store already
+refuses to make from access joins, for the same reason: a wrongly guessed
+target, once enriched, buries the right one behind it.
+
 **Ratings are never mutated.** Healing an old miss mints a *new* rating rather
 than flipping the original: first-contact failure rate is an acceptance metric,
 and rewriting a miss into a hit would be cooking it. Each validated heal instead
