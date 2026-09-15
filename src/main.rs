@@ -764,7 +764,12 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Status => {
+            // Opening the store converged these, so they agree by construction;
+            // the line is here because an index count is how you see that the
+            // index is populated at all. A convergence that had work to do said
+            // so on stderr on the way in.
             println!("episodes: {}", svc.count()?);
+            println!("indexed:  {}", svc.indexed_count()?);
         }
         Command::Stats => {
             let s = svc.stats()?;

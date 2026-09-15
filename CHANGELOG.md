@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - subject index: `ecphory render-index` writes a workspace's recall keys into `AGENTS.md` (the file codex, agy and OpenCode read) and Claude Code's per-project `MEMORY.md`, inside an idempotent marked region; `ecphory workspace-key` prints the `ws:<slug>` tag that scopes an episode to a workspace; `GET /memory/episodes?tags=` filters a listing (#24)
 
+### Fixed
+
+- *(index)* stop reindexing the whole store on every open. The cold-start check asked `search("*")`, which tokenizes to nothing and so read every index as empty; it now compares the index's document count against the store's, which keeps repairing real drift (a write or purge that reached only one of the two) while leaving a healthy index untouched. On a 900-episode store `ecphory search` goes from 390 ms to 54 ms, and read-only commands no longer commit to the index. `status` reports the index document count (#30)
+
 ## [0.3.6](https://github.com/JaysonRawlins/ecphory/compare/v0.3.5...v0.3.6) - 2026-09-14
 
 ### Added
