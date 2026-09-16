@@ -36,25 +36,31 @@ everything. Two tools split the work:
 | `HOMEBREW_TAP_TOKEN` | homebrew publish job | PAT with push to `JaysonRawlins/homebrew-tap` — or install `ecphory-release-bot` on the tap and mint a token in a pre-step (needs `allow-dirty = ["ci"]` to customize dist's release.yml; PAT is less invasive). Only needed once the publish job is enabled (public flip). |
 | `CARGO_REGISTRY_TOKEN` | crates.io publish | Only at/after public flip, and only for the first publish if Trusted Publishing is set up afterwards. |
 
-## Rehearsal (works on the private repo)
+## Rehearsal
 
 Push an rc tag from a green commit: `git tag v0.3.0-rc.N && git push origin
 v0.3.0-rc.N`. dist treats it as a prerelease: full builds, a prerelease
 GitHub Release, no Homebrew/crates publish. Delete the tag + release after.
 PRs also run dist's `plan` step as a cheap config check.
 
-Private-repo limits (both fixed by flipping public): `ecphory-installer.sh`
-can't fetch assets anonymously — override the download base with
-`ECPHORY_INSTALLER_DOWNLOAD_URL` to test; and the public tap must not
-reference private URLs, so the homebrew *publish* job stays disabled.
+Both former private-repo limits are gone as of the 2026-09-16 flip:
+`ecphory-installer.sh` can now fetch release assets anonymously (it was
+never broken — the repo being private was the only thing stopping it), and
+the Homebrew publish job is no longer blocked by a tap that must not
+reference private URLs. Enabling that job is step 3 below.
 
 ## Public-flip-day checklist
 
-1. Flip repo visibility to public.
-2. Apply branch protection: `.github/rulesets/apply.sh` (it refuses to
-   run while the repo is private). Rulesets are free on public repos;
-   the payloads and the reasoning behind each rule are in
-   [.github/rulesets/](../.github/rulesets/README.md).
+Steps 1 and 2 are the flip itself and are **done** (2026-09-16); 3–6
+remain. Smoke-test a real `curl | sh` install from a clean machine before
+working through them — it is the one thing the private repo could never
+prove.
+
+1. ~~Flip repo visibility to public.~~ Done 2026-09-16.
+2. ~~Decide the contribution policy.~~ Done: issues yes, external PRs
+   auto-closed — see [CONTRIBUTING.md](../CONTRIBUTING.md). Branch
+   protection is written but **not applied**; the payloads and the
+   reasoning are in [.github/rulesets/](../.github/rulesets/README.md).
 3. `dist-workspace.toml`: add `publish-jobs = ["homebrew"]` and
    `github-attestations = true`; run `dist generate`; add
    `HOMEBREW_TAP_TOKEN` secret. Formula lands in

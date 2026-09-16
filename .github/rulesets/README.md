@@ -1,11 +1,14 @@
 # Repository rulesets
 
-Application is blocked until the repo is public (GitHub refuses every
-rulesets endpoint on a private repo without Pro/Team/Enterprise: *"Upgrade
+**Not applied yet.** These payloads are reviewed and ready; turning them on
+is a separate, deliberate step.
+
+Until 2026-09-16 they could not be applied at all — GitHub refuses every
+rulesets endpoint on a private repo without Pro/Team/Enterprise (*"Upgrade
 to GitHub Pro or make this repository public to enable this feature"*, HTTP
-403). The payloads below are the protection as it should be applied the
-moment that changes — public flip or plan upgrade, either unblocks it.
-Flip-day steps: [docs/RELEASING.md](../../docs/RELEASING.md).
+403). The repo is public now, so that block is gone and `apply.sh` will
+work. What remains is the judgement call about running it, because these
+rules bind the maintainer too.
 
 ```bash
 .github/rulesets/apply.sh --check   # validate, write nothing
