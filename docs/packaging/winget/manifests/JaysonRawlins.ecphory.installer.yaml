@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+#
+# Template. Placeholders are filled by ../render-manifests.sh — do not submit
+# this file as-is.
+#
+# InstallerType zip + NestedInstallerType portable: dist ships a plain zip of
+# the binary, not an installer. winget unpacks it and puts `ecphory` on PATH
+# via the portable-package shim.
+#
+# RelativeFilePath is `ecphory.exe` with NO directory prefix: dist's Windows
+# zip is flat (ecphory.exe, README.md, LICENSE, CHANGELOG.md at the root).
+# Verify with `unzip -l` after any dist upgrade — a wrong path here fails
+# winget's install validation, not its manifest validation, so it survives
+# `winget validate` and dies in the PR pipeline.
+
+PackageIdentifier: JaysonRawlins.ecphory
+PackageVersion: __VERSION__
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: ecphory.exe
+    PortableCommandAlias: ecphory
+ReleaseDate: '__RELEASE_DATE__'
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/JaysonRawlins/ecphory/releases/download/v__VERSION__/ecphory-x86_64-pc-windows-msvc.zip
+    InstallerSha256: __SHA256__
+ManifestType: installer
+ManifestVersion: 1.12.0

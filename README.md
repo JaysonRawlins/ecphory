@@ -162,7 +162,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JaysonRawlins/ecphory/r
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/JaysonRawlins/ecphory/releases/latest/download/ecphory-installer.ps1 | iex"
 ```
 
-winget packaging is planned (portable exe works today from the Release zip).
+winget is packaged and awaiting its first submission to winget-pkgs; the
+portable exe works today from the Release zip. See
+[docs/packaging/winget](docs/packaging/winget/).
 
 **cargo-binstall / from source:**
 

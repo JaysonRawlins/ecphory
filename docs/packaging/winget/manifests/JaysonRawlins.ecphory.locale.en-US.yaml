@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+#
+# Template. Placeholders are filled by ../render-manifests.sh — do not submit
+# this file as-is.
+
+PackageIdentifier: JaysonRawlins.ecphory
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: Jayson Rawlins
+PublisherUrl: https://github.com/JaysonRawlins
+PublisherSupportUrl: https://github.com/JaysonRawlins/ecphory/issues
+Author: Jayson Rawlins
+PackageName: ecphory
+PackageUrl: https://github.com/JaysonRawlins/ecphory
+License: MIT
+LicenseUrl: https://github.com/JaysonRawlins/ecphory/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Jayson Rawlins
+CopyrightUrl: https://github.com/JaysonRawlins/ecphory/blob/main/LICENSE
+ShortDescription: Recall, measured. A single-binary, lexical-first memory store for AI agents.
+Description: |-
+  ecphory is a memory store for AI agents: one static binary, no model
+  dependencies, no sidecar daemons, no vector database. Full-text BM25 search
+  runs over episode content, names, and write-time search phrases supplied by
+  the capturing agent.
+
+  Every search and by-id fetch is logged, so retrieval quality is measured
+  against the real workload rather than a hand-built gold set. Agents rate a
+  search hit, partial, or miss; a rated miss appends the failed query to the
+  episode that should have surfaced, re-runs the search to validate, and keeps
+  the validated heal as a permanent regression test.
+
+  Speaks MCP (stdio and streamable HTTP), a REST mirror, and a CLI.
+Moniker: ecphory
+Tags:
+  - agent
+  - ai
+  - bm25
+  - cli
+  - full-text-search
+  - knowledge-base
+  - mcp
+  - memory
+  - model-context-protocol
+  - rag
+  - retrieval
+  - rust
+  - search
+ReleaseNotesUrl: https://github.com/JaysonRawlins/ecphory/releases/tag/v__VERSION__
+Documentations:
+  - DocumentLabel: Releasing
+    DocumentUrl: https://github.com/JaysonRawlins/ecphory/blob/main/docs/RELEASING.md
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
