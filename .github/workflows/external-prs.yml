@@ -1,0 +1,50 @@
+name: external-prs
+
+# Issues are the contribution channel for this repo; pull requests from
+# outside are closed. GitHub has no setting for that: forking cannot be
+# turned off on a public repo ("Allow forks setting can only be changed on
+# org-owned private repositories", HTTP 422), so it is enforced here.
+#
+# pull_request_target, NOT pull_request: a fork's pull_request run gets a
+# read-only token and cannot close anything. pull_request_target runs in the
+# base repo's context with a writable token, which is only safe because this
+# job never checks out or runs the pull request's code. Do not add a
+# checkout step, and do not make this workflow build anything.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-24.04
+    # Opening a PR from a branch in this repo requires push access, which
+    # covers the maintainer and the release bots (release-plz pushes its
+    # release PR to a local branch). Everyone else has to fork, so "the head
+    # is a fork" is the test for "external". The author_association check is
+    # a second gate so the maintainer's own fork is never caught.
+    if: >-
+      github.event.pull_request.head.repo.full_name != github.repository
+      && !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+      github.event.pull_request.author_association)
+    steps:
+      - name: Close, and say where to go instead
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          cat > "$RUNNER_TEMP/reply.md" <<'EOF'
+          🤖 *Jayson's Claude Bot*
+
+          Thanks for this, and sorry: I do not take unsolicited pull requests, so this one is closed automatically and unread. It is not about your patch.
+
+          Please open an [issue](https://github.com/JaysonRawlins/ecphory/issues) describing the problem you hit, and link your branch from it. Issues I do read, and if code turns out to be the right answer I will ask you for it. The policy is in [CONTRIBUTING.md](https://github.com/JaysonRawlins/ecphory/blob/main/CONTRIBUTING.md).
+
+          *Automated reply, not reviewed by Jayson.*
+          EOF
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/reply.md"
+          gh pr close "$PR" --repo "$GITHUB_REPOSITORY"
