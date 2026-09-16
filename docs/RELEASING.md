@@ -51,16 +51,20 @@ reference private URLs, so the homebrew *publish* job stays disabled.
 ## Public-flip-day checklist
 
 1. Flip repo visibility to public.
-2. `dist-workspace.toml`: add `publish-jobs = ["homebrew"]` and
+2. Apply branch protection: `.github/rulesets/apply.sh` (it refuses to
+   run while the repo is private). Rulesets are free on public repos;
+   the payloads and the reasoning behind each rule are in
+   [.github/rulesets/](../.github/rulesets/README.md).
+3. `dist-workspace.toml`: add `publish-jobs = ["homebrew"]` and
    `github-attestations = true`; run `dist generate`; add
    `HOMEBREW_TAP_TOKEN` secret. Formula lands in
    `JaysonRawlins/homebrew-tap/Formula/ecphory.rb` on the next release →
    `brew install jaysonrawlins/tap/ecphory`.
-3. crates.io (`cargo install ecphory` channel): in `release-plz.toml` set
+4. crates.io (`cargo install ecphory` channel): in `release-plz.toml` set
    `publish = true`, drop `git_only`; add `CARGO_REGISTRY_TOKEN`; the name
    `ecphory` was free as of 2026-07-12. Don't publish before the flip — the
    .crate file exposes the source.
-4. Windows/winget: first submission is manual once assets are public —
+5. Windows/winget: first submission is manual once assets are public —
    `wingetcreate new` against the release zip (portable type), then wire
    [winget-releaser](https://github.com/vedantmgoyal9/winget-releaser) into
    the release workflow for zero-touch version bumps. **Decision record:
@@ -68,7 +72,7 @@ reference private URLs, so the homebrew *publish* job stays disabled.
    human moderation (days–weeks until "trusted"); winget auto-approves
    updates after the first merge and ships preinstalled on Win10/11. A
    personal Scoop bucket is a cheap optional third channel.
-5. Announce; `cargo binstall ecphory` works with no extra config (dist's
+6. Announce; `cargo binstall ecphory` works with no extra config (dist's
    artifact naming is auto-detected).
 
 ## macOS note (manual installs only)
