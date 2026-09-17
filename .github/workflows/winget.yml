@@ -1,0 +1,63 @@
+name: winget
+
+# Bumps JaysonRawlins.ecphory in microsoft/winget-pkgs after a release.
+#
+# INERT BY DEFAULT. The job is skipped unless the repo variable
+# WINGET_ENABLED is set to "true", because every precondition below is a
+# flip-day step and a half-wired run would open a junk PR against a
+# Microsoft-owned repo:
+#
+#   1. The repo must be PUBLIC, so winget's validation pipeline can download
+#      InstallerUrl anonymously. Done 2026-09-16; the guard step below still
+#      checks it per run, since a release can be missing its asset too.
+#   2. JaysonRawlins.ecphory must ALREADY exist in winget-pkgs with at least
+#      one version. winget-releaser bumps an existing package, it cannot
+#      create one. Do the first submission by hand — see
+#      docs/packaging/winget/README.md.
+#   3. Secret WINGET_TOKEN: a CLASSIC PAT with `public_repo` scope
+#      (fine-grained tokens are not supported by the action).
+#   4. A fork of microsoft/winget-pkgs under the same account.
+#
+# Trigger is workflow_dispatch ON PURPOSE. `on: release` would never fire:
+# dist creates the GitHub Release with the default GITHUB_TOKEN
+# (release.yml), and GitHub's loop prevention means events raised by that
+# token do not start other workflows — the same rule that forces release-plz
+# to tag with an app token. Making this zero-touch means adding it as a dist
+# custom publish job in dist-workspace.toml and re-running `dist generate`,
+# so that it runs inside release.yml after the artifacts are uploaded. Until
+# then this is one click after a release lands.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, without the leading v (e.g. 0.3.7)'
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: publish to winget-pkgs
+    if: vars.WINGET_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Refuse to submit an installer the world cannot download
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          url="https://github.com/JaysonRawlins/ecphory/releases/download/v${VERSION}/ecphory-x86_64-pc-windows-msvc.zip"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 60 "$url")
+          echo "anonymous GET $url -> $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::Installer URL is not anonymously downloadable (HTTP $code). winget validation would fail."
+            exit 1
+          fi
+
+      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: JaysonRawlins.ecphory
+          version: ${{ inputs.version }}
+          release-tag: v${{ inputs.version }}
+          installers-regex: 'ecphory-x86_64-pc-windows-msvc\.zip$'
+          max-versions-to-keep: 5
+          token: ${{ secrets.WINGET_TOKEN }}

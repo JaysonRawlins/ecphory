@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+#
+# Template. Placeholders are filled by ../render-manifests.sh — do not submit
+# this file as-is.
+
+PackageIdentifier: JaysonRawlins.ecphory
+PackageVersion: __VERSION__
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.12.0
