@@ -48,6 +48,8 @@ enum Command {
         content: String,
         #[arg(long)]
         name: Option<String>,
+        /// The writing system alone, e.g. "claude-code" — never a
+        /// "system/model" compound
         #[arg(long, default_value = "cli")]
         source: String,
         /// Paraphrase search cues (repeatable) — write-time lexical enrichment
@@ -95,10 +97,11 @@ enum Command {
         phrases: Vec<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
-        /// Correct the originating system, e.g. "claude-code"
+        /// Correct the writing system, e.g. "claude-code" — one name, never
+        /// a "system/model" compound
         #[arg(long)]
         source: Option<String>,
-        /// Correct the capturing model
+        /// Correct the writing model, alone, e.g. "claude-opus-5"
         #[arg(long)]
         source_model: Option<String>,
         /// Correct the source description

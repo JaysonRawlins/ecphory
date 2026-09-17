@@ -75,6 +75,32 @@ writes a `resolution_log` row, which is **exempt from the 90-day recorder
 prune** — every healed miss becomes a permanent regression test. `ecphory eval
 --heals` replays them all and exits non-zero if any heal has regressed.
 
+## Provenance: who wrote this
+
+Three fields ride along with every episode, and they answer three different
+questions:
+
+| field | holds | examples |
+| --- | --- | --- |
+| `source` | the writing **system** — agent, harness or tool | `claude-code`, `codex`, `teachme` |
+| `source_model` | the **model**, alone | `claude-opus-5`, `claude-opus-5[1m]`, `gpt-5` |
+| `source_description` | free text: the session, task or run | `"issue #41 repair, 2026-09-17"` |
+
+One name in `source`, never a `system/model` compound: folding the model in is
+what makes a later `GROUP BY source_model` quietly undercount. Never blank
+either — when the writing system genuinely isn't known, the honest value is the
+literal `unknown`, because a query can count `unknown` and cannot count `""`.
+Record the model as your harness reports it, context-window marker included:
+`claude-opus-5[1m]` was true at write time, and nothing downstream can recover
+that afterwards.
+
+None of this is enforced on write. Axiom 3 — the server stores what the edge
+gives it — applies to provenance as much as to content, so the convention is
+written where an agent actually reads it (the MCP tool schema) rather than
+checked in a validator. The counterweight is that all three fields stay
+correctable for the life of the episode, archived and reversible like every
+other field.
+
 ## Deletion story
 
 Deletion is two-phase, and the phases have different owners:

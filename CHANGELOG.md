@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- *(provenance)* write the `source` / `source_model` / `source_description` convention down where an agent reads it. `source_model` and `source_description` carried no schema description at all, so the only guidance a writing agent ever got was `source`'s "Originating system" — and the store drifted into two conventions for the same fact: 12 episodes fold the model into `source` with a slash (`claude-code/opus-4-7`), 11 leave `source` empty, and `opus-4-7` is a spelling of `opus-4.7` that is neither the API id nor the human short form. All three fields now say what belongs in them on the MCP `add_memory` and `update_episode` schemas, the REST body and the CLI, and the README states the convention for humans. Nothing is validated on write — axiom 3 holds for provenance too — so this is documentation plus a one-off repair of the 48 affected episodes in the reference deployment, not a behaviour change (#41)
 - *(ratings)* say plainly, on every rating surface, that `used_episode_ids` is telemetry and `intended_episode_ids` is the only field that edits an episode, and pin that promise at the wire with a regression test — a `partial` carrying used ids only must leave every episode it names untouched. The behaviour shipped in 0.3.6; only the contract was unwritten (#18)
 
 ## [0.3.6](https://github.com/JaysonRawlins/ecphory/compare/v0.3.5...v0.3.6) - 2026-09-14
