@@ -622,6 +622,13 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
                 ),
             ),
         );
+        // NOTE: this nest puts /mcp OUTSIDE the bearer gate that
+        // `build_router` layers on /api/v1, so ECPHORY_AUTH_TOKEN does not
+        // reach the MCP surface. Verified: with the token set, /api/v1
+        // answers 401 while /mcp completes a full handshake and serves
+        // tools/call. Tracked in issue #47; the loopback bind below is what
+        // is actually holding, and the README says so.
+        //
         // Loopback only: single-user local daemon, no remote surface.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         tracing::info!("ecphory MCP listening on http://127.0.0.1:{port}/mcp");

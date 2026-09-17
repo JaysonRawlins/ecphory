@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- *(security)* add `SECURITY.md` and document the daemon's boundary. The repo went public with no disclosure channel, so a vulnerability report's only route into a memory store was a public issue; private vulnerability reporting is now enabled and `SECURITY.md` carries the threat model and an in-scope/out-of-scope list. `ECPHORY_AUTH_TOKEN` was undocumented everywhere a user reads, which left an open-by-default data plane looking like an oversight rather than a design: the README now says the hard-coded loopback bind is the boundary, why the plane is open inside it, and how to set the token. Writing it down turned up that the token covers `/api/v1` only, so `/mcp` answers a full handshake and `tools/call` without a credential (#47); that is now stated rather than discoverable. The REST half is pinned by a wire test that was staged red against both a disabled gate and a weakened comparison
 - *(ratings)* say plainly, on every rating surface, that `used_episode_ids` is telemetry and `intended_episode_ids` is the only field that edits an episode, and pin that promise at the wire with a regression test — a `partial` carrying used ids only must leave every episode it names untouched. The behaviour shipped in 0.3.6; only the contract was unwritten (#18)
 
 ## [0.3.6](https://github.com/JaysonRawlins/ecphory/compare/v0.3.5...v0.3.6) - 2026-09-14

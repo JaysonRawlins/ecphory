@@ -633,11 +633,18 @@ mod tests {
     /// Same server, but hands back the shared service so a test can compare
     /// what came over the wire against the store's own answer.
     async fn spawn_server_with_state() -> (String, tempfile::TempDir, Shared) {
+        spawn_server_with_token(None).await
+    }
+
+    /// The auth-on variant. Same `build_router`, same middleware stack, only
+    /// the configured token differs — so a test of the gate drives the real
+    /// one rather than a stand-in that can agree with a broken original.
+    async fn spawn_server_with_token(token: Option<&str>) -> (String, tempfile::TempDir, Shared) {
         let dir = tempfile::tempdir().expect("tempdir");
         let svc = Ecphory::open_with(dir.path().join("e2e.redb"), true).expect("open");
         let state = Arc::new(AppState {
             svc: Arc::new(Mutex::new(svc)),
-            token: None,
+            token: token.map(str::to_string),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1177,6 +1184,127 @@ mod tests {
                 .unwrap(),
             mangled,
             "the prior provenance must be archived, not discarded"
+        );
+    }
+
+    // ---- the bearer gate ------------------------------------------------------
+    //
+    // Loopback binding is the boundary that actually holds. The token is the
+    // second wall, for the day the port is forwarded — an SSH tunnel, a
+    // container port map, a VM. A second wall nobody has watched fail is not
+    // a wall, and until this test the auth path had no coverage at all: every
+    // harness above builds the router with `token: None`, which is the one
+    // configuration in which `require_auth` returns before it decides
+    // anything. So this drives the real middleware over a real socket.
+    //
+    // Scope, pinned here because prose drifts away from code: this gate is
+    // layered inside `build_router`, on the /api/v1 data plane only. The MCP
+    // transport is nested OUTSIDE it, by `serve_http` in mcp.rs, and nothing
+    // asserted below says a word about /mcp. That gap is issue #47.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bearer_auth_gates_the_data_plane_and_leaves_the_probe_open() {
+        const TOKEN: &str = "correct-horse-battery-staple";
+
+        fn code<B>(r: Result<ureq::http::Response<B>, ureq::Error>) -> u16 {
+            match r {
+                Ok(resp) => resp.status().as_u16(),
+                Err(ureq::Error::StatusCode(c)) => c,
+                Err(e) => panic!("wanted an HTTP status, got a transport error: {e}"),
+            }
+        }
+
+        let (base, _dir, _state) = spawn_server_with_token(Some(TOKEN)).await;
+
+        // A supervisor has to be able to probe a daemon it holds no token
+        // for, so /health is deliberately outside the gate.
+        assert_eq!(
+            code(ureq::get(format!("{base}/health")).call()),
+            200,
+            "/health must answer an unauthenticated probe"
+        );
+
+        // Reads are gated.
+        assert_eq!(
+            code(ureq::get(format!("{base}/api/v1/status")).call()),
+            401,
+            "no Authorization header must not reach the data plane"
+        );
+
+        // Writes are gated, which is the half that actually matters: an open
+        // write surface does not leak a memory store, it rewrites one.
+        assert_eq!(
+            code(
+                ureq::post(format!("{base}/api/v1/memory"))
+                    .send_json(json!({"content": "smuggled past the gate"}))
+            ),
+            401,
+            "an unauthenticated write must be refused"
+        );
+
+        // Same length as TOKEN, differing in the last byte: this is the path
+        // through `constant_time_eq` that actually compares, rather than the
+        // length shortcut the unit test above already covers.
+        let near_miss = format!("{}x", &TOKEN[..TOKEN.len() - 1]);
+        assert_eq!(
+            near_miss.len(),
+            TOKEN.len(),
+            "the near miss must be equal-length"
+        );
+        assert_eq!(
+            code(
+                ureq::get(format!("{base}/api/v1/status"))
+                    .header("Authorization", &format!("Bearer {near_miss}"))
+                    .call()
+            ),
+            401,
+            "an equal-length wrong token must still be refused"
+        );
+
+        // The scheme is part of the check, not decoration.
+        assert_eq!(
+            code(
+                ureq::get(format!("{base}/api/v1/status"))
+                    .header("Authorization", TOKEN)
+                    .call()
+            ),
+            401,
+            "a bare token with no Bearer prefix must be refused"
+        );
+
+        // Nothing above was allowed to have landed. Asked with the right
+        // token, the store must still be empty — a 401 that wrote anyway is
+        // the failure this whole test exists to catch.
+        let ok = ureq::get(format!("{base}/api/v1/status"))
+            .header("Authorization", &format!("Bearer {TOKEN}"))
+            .call();
+        assert_eq!(code(ok), 200, "the configured token must be accepted");
+
+        let status: serde_json::Value = ureq::get(format!("{base}/api/v1/status"))
+            .header("Authorization", &format!("Bearer {TOKEN}"))
+            .call()
+            .expect("authorized status")
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(
+            status["episodes"],
+            json!(0),
+            "every refused call must also have been a refused write"
+        );
+
+        // And the authorized path is a working path, not merely a 200: the
+        // write lands and is readable back.
+        let created: serde_json::Value = ureq::post(format!("{base}/api/v1/memory"))
+            .header("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(json!({"content": "let through the gate"}))
+            .expect("authorized write")
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert!(
+            created["episode"]["id"].as_str().is_some(),
+            "an authorized write must create an episode"
         );
     }
 }

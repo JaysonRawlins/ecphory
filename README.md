@@ -179,6 +179,41 @@ you. Binaries are ad-hoc signed; notarization is future work.
 
 See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
 
+## Security
+
+The daemon binds `127.0.0.1`, and only `127.0.0.1`. That is hard-coded at the
+listener rather than offered as a flag or an environment variable — `--port`
+and `$ECPHORY_PORT` move the port, nothing moves the address — so there is no
+configuration of ecphory that serves your memories to a network. The loopback
+binding is the boundary, and it is what is actually protecting the store.
+
+Inside that boundary the data plane is open by default: anything that can reach
+the port can read, write and delete episodes. That is deliberate for a
+single-user local daemon. A process running as you can already open the store
+file directly, so a gate on the port would not be keeping it out of anything.
+
+Set `ECPHORY_AUTH_TOKEN` to require a bearer token as well:
+
+```sh
+ECPHORY_AUTH_TOKEN=$(openssl rand -hex 32) ecphory serve
+```
+
+Clients then send `Authorization: Bearer <token>`, and the CLI reads the same
+variable, so the commands that go through the daemon — `search-log`,
+`access-log`, `ratings`, `heals`, `eval`, `render-index` — keep working with no
+extra flag. Two things to know about what it covers: `/health` stays open so a
+supervisor can probe a daemon it holds no token for, and the MCP transport at
+`/mcp` is **not** behind the gate — the token guards `/api/v1/*` only
+([#47](https://github.com/JaysonRawlins/ecphory/issues/47)). Treat it as a second wall for the day the port stops being
+loopback-only (an SSH tunnel, a container port map, a VM forward), never as the
+reason it would be safe to forward the port.
+
+At rest the store is an ordinary unencrypted file protected by filesystem
+permissions, and turning on the git mirror (`ECPHORY_EXPORT_DIR`) writes your
+episodes to that repository in plaintext, where they travel with it.
+[SECURITY.md](SECURITY.md) has the full threat model and how to report a
+vulnerability privately.
+
 ## Status
 
 v0.3.5. Canonical store, tantivy BM25 search with write-time phrase boosting,
