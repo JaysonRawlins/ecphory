@@ -14,9 +14,10 @@ everything. Two tools split the work:
   (`dist-workspace.toml`, `.github/workflows/release.yml`, generated — edit
   the toml and run `dist generate`, never the yml) — triggers on the tag
   push, cross-builds every target, and creates the GitHub Release with:
-  - `ecphory-aarch64-apple-darwin.tar.xz`, `ecphory-x86_64-apple-darwin.tar.xz`
-  - `ecphory-aarch64-unknown-linux-musl.tar.xz`, `ecphory-x86_64-unknown-linux-musl.tar.xz`
+  - `ecphory-aarch64-apple-darwin.tar.gz`, `ecphory-x86_64-apple-darwin.tar.gz`
+  - `ecphory-aarch64-unknown-linux-musl.tar.gz`, `ecphory-x86_64-unknown-linux-musl.tar.gz`
     (static binaries — no glibc floor, run on any Linux back to ~2014)
+  - `.tar.gz`, not dist's default `.tar.xz` — see *Install smoke test* below
   - `ecphory-x86_64-pc-windows-msvc.zip`
   - `ecphory-installer.sh`, `ecphory-installer.ps1`, `ecphory.rb` (Homebrew
     formula), `sha256.sum` + per-artifact `.sha256`
@@ -53,9 +54,8 @@ reference private URLs. Enabling that job is step 3 below.
 ## Public-flip-day checklist
 
 Steps 1 and 2 are the flip itself and are **done** (2026-09-16); 3–6
-remain. Smoke-test a real `curl | sh` install from a clean machine before
-working through them — it is the one thing the private repo could never
-prove.
+remain. The clean-machine `curl | sh` smoke test that gated them is **done**
+(2026-09-17) and found a real bug — see *Install smoke test* below.
 
 1. ~~Flip repo visibility to public.~~ Done 2026-09-16.
 2. ~~Decide the contribution policy.~~ Done: issues yes, external PRs
@@ -82,6 +82,47 @@ prove.
    Scoop bucket is a cheap optional third channel.
 6. Announce; `cargo binstall ecphory` works with no extra config (dist's
    artifact naming is auto-detected).
+
+## Install smoke test
+
+`docs/smoke-test-install.sh [VERSION]` runs the published one-liner the way
+a stranger runs it: anonymous fetch (tokens explicitly unset), no
+`ECPHORY_DOWNLOAD_URL` override, throwaway containers for Linux and a
+redirected `$HOME` on macOS. A row passes only if the installer exits 0, the
+binary lands and runs, the receipt and env shim are written, the PATH advice
+it printed actually resolves the binary, and `add` + `search` work on a cold
+store. Run it after cutting a release.
+
+**Why the artifacts are `.tar.gz`.** The first real run (2026-09-17, against
+v0.3.6) failed on stock `debian:bookworm-slim` and `ubuntu:24.04`:
+
+```
+tar (child): xz: Cannot exec: No such file or directory
+ERROR: command failed: tar xf /tmp/tmp.XXXX/input.tar.xz ...
+```
+
+dist defaults to `.tar.xz`, and the installer it generates preflights `tar`
+but never `xz`. Those images ship `tar` and `gzip` but not `xz`, so the
+install died inside tar with a message that names neither the missing
+package nor a fix. Alpine survived only because busybox `tar` decompresses
+xz in-process, and Fedora only because it ships `xz` — which is why this was
+invisible until someone tried a Debian-family box.
+
+`unix-archive = ".tar.gz"` in `dist-workspace.toml` is the fix: gzip is
+present everywhere xz was not. It costs about 2.4 MiB per artifact (4.19 →
+6.62 MiB for linux-musl-aarch64, +58%), which is the right trade for an
+install that works on the most common Linux base images. Windows stays
+`.zip`, unaffected.
+
+Verified both directions: the published `.tar.xz` fails on debian-slim, and
+the regenerated installer plus a `.tar.gz` artifact succeeds on the same
+image with `xz` still absent.
+
+**macOS/Gatekeeper result:** clean. The installed binary carries no
+`com.apple.quarantine` (only the benign `com.apple.provenance`), so the
+ad-hoc-signed binary executes with no prompt and no SIGKILL. `spctl -a`
+still reports `rejected` — expected, since it assesses as though the file
+were quarantined; it is not what the kernel consults at exec time here.
 
 ## macOS note (manual installs only)
 

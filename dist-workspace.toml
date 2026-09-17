@@ -19,3 +19,10 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-d
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Archive format for macOS/Linux artifacts. Deliberately .tar.gz, NOT the
+# dist default .tar.xz: the generated installer's preflight checks for `tar`
+# but never for `xz`, so on any image with tar-but-no-xz (debian-slim,
+# ubuntu) `curl | sh` died with "tar (child): xz: Cannot exec". gzip is
+# present on those images where xz is not. Costs a couple of MiB per
+# artifact; buys an install that works on a stock minimal Linux.
+unix-archive = ".tar.gz"
