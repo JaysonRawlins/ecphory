@@ -120,10 +120,15 @@ struct AddMemoryBody {
     name: String,
     #[serde(default)]
     search_phrases: Vec<String>,
+    /// The writing system alone — "claude-code", "codex". Never a
+    /// "system/model" compound; defaults to "http" when omitted, so it is
+    /// never stored empty.
     #[serde(default)]
     source: String,
+    /// The writing model alone, as the harness reports it.
     #[serde(default)]
     source_model: String,
+    /// Free text: the session, task or run this came out of.
     #[serde(default)]
     source_description: String,
     #[serde(default)]
