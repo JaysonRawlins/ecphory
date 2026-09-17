@@ -192,21 +192,33 @@ the port can read, write and delete episodes. That is deliberate for a
 single-user local daemon. A process running as you can already open the store
 file directly, so a gate on the port would not be keeping it out of anything.
 
-Set `ECPHORY_AUTH_TOKEN` to require a bearer token as well:
+Set `ECPHORY_AUTH_TOKEN` to require a bearer token on top of that:
 
 ```sh
 ECPHORY_AUTH_TOKEN=$(openssl rand -hex 32) ecphory serve
 ```
 
-Clients then send `Authorization: Bearer <token>`, and the CLI reads the same
-variable, so the commands that go through the daemon — `search-log`,
+It covers both surfaces, REST and MCP. `/health` is the single exception, left
+open so a supervisor can probe a daemon it holds no token for. The CLI reads
+the same variable, so the commands that go through the daemon — `search-log`,
 `access-log`, `ratings`, `heals`, `eval`, `render-index` — keep working with no
-extra flag. Two things to know about what it covers: `/health` stays open so a
-supervisor can probe a daemon it holds no token for, and the MCP transport at
-`/mcp` is **not** behind the gate — the token guards `/api/v1/*` only
-([#47](https://github.com/JaysonRawlins/ecphory/issues/47)). Treat it as a second wall for the day the port stops being
-loopback-only (an SSH tunnel, a container port map, a VM forward), never as the
-reason it would be safe to forward the port.
+extra flag, and an MCP client sends `Authorization: Bearer <token>` like any
+other client.
+
+Where the client gets that token from is worth a thought, because a token
+pasted into a config file is a plaintext secret sitting next to the thing it
+protects. If your MCP client can generate headers by running a command, use
+that instead: Claude Code's `headersHelper` runs on every connection and merges
+its output into the request headers, so the value can come from your secret
+manager at connect time and never be written to a file at all.
+
+Be honest with yourself about whether you want it at all. On a single-user
+machine whose port is never forwarded, the token protects against nobody — a
+process running as you can open the store file directly, token or no token. The
+case it exists for is the port ceasing to be loopback-only: an SSH tunnel, a
+container port map, a VM forward. It is what stands between a reachable port
+and your memories in that situation, which is different from being a reason to
+put it in one.
 
 At rest the store is an ordinary unencrypted file protected by filesystem
 permissions, and turning on the git mirror (`ECPHORY_EXPORT_DIR`) writes your

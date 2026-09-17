@@ -13,9 +13,9 @@ use crate::service::{Ecphory, SearchOptions};
 use crate::store::ListOptions;
 
 /// REST mirror of the MCP surface, served by the same daemon (one process
-/// owns the redb lock). Data plane is gated by the opt-in bearer token;
-/// /health stays open for probes. Loopback binding is the outer wall —
-/// auth is defense in depth for when the port is ever forwarded.
+/// owns the redb lock). Both surfaces — REST and MCP — are gated by the
+/// opt-in bearer token; /health stays open for probes. Loopback binding is
+/// the outer wall, auth is defense in depth for when the port is forwarded.
 pub struct AppState {
     pub svc: Arc<Mutex<Ecphory>>,
     pub token: Option<String>,
@@ -23,7 +23,13 @@ pub struct AppState {
 
 type Shared = Arc<AppState>;
 
-pub fn build_router(state: Shared) -> Router {
+/// `mcp` is the MCP transport, passed in rather than bolted on by the caller.
+/// It used to be nested onto the *finished* router by `serve_http`, which put
+/// it outside the auth layer and left the entire tool surface reachable with
+/// no credential whenever a token was set (#47). Taking it as a parameter is
+/// what makes that shape unrepresentable: there is one guarded router, and
+/// everything that touches memories is nested inside it.
+pub fn build_router(state: Shared, mcp: Option<Router<Shared>>) -> Router {
     let data_plane = Router::new()
         .route("/memory", post(add_memory))
         .route("/memory/search", get(search))
@@ -47,18 +53,29 @@ pub fn build_router(state: Shared) -> Router {
         .route("/memory/stats", get(stats))
         .route("/status", get(status))
         .route("/admin/import", post(admin_import))
-        .route("/admin/export", post(admin_export))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_auth,
-        ));
+        .route("/admin/export", post(admin_export));
 
+    // One gate, layered once, over everything that reads or writes episodes.
+    // Add a surface by nesting it HERE; nesting it onto the router this
+    // function returns puts it outside the token, which is exactly how #47
+    // happened.
+    let mut guarded = Router::new().nest("/api/v1", data_plane);
+    if let Some(mcp) = mcp {
+        guarded = guarded.nest("/mcp", mcp);
+    }
+    let guarded = guarded.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_auth,
+    ));
+
+    // /health is the only thing deliberately outside: a supervisor has to be
+    // able to probe a daemon it holds no token for.
     Router::new()
         .route(
             "/health",
             get(|| async { Json(json!({"status": "healthy"})) }),
         )
-        .nest("/api/v1", data_plane)
+        .merge(guarded)
         .with_state(state)
 }
 
@@ -646,11 +663,19 @@ mod tests {
             svc: Arc::new(Mutex::new(svc)),
             token: token.map(str::to_string),
         });
+        // A stand-in for the MCP transport, mounted through the SAME parameter
+        // `serve_http` hands the real one to. The protocol is not what is
+        // under test here; the nesting is, and a stub proves the route lands
+        // inside the auth layer rather than beside it.
+        let mcp_stub = Router::new().fallback(|| async { "mcp stub reached" });
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let served = Arc::clone(&state);
         tokio::spawn(async move {
-            axum::serve(listener, build_router(served)).await.unwrap();
+            axum::serve(listener, build_router(served, Some(mcp_stub)))
+                .await
+                .unwrap();
         });
         (format!("http://{addr}"), dir, state)
     }
@@ -1197,10 +1222,13 @@ mod tests {
     // configuration in which `require_auth` returns before it decides
     // anything. So this drives the real middleware over a real socket.
     //
-    // Scope, pinned here because prose drifts away from code: this gate is
-    // layered inside `build_router`, on the /api/v1 data plane only. The MCP
-    // transport is nested OUTSIDE it, by `serve_http` in mcp.rs, and nothing
-    // asserted below says a word about /mcp. That gap is issue #47.
+    // /mcp is asserted here too, and that is the point of the test as much as
+    // the 401s are. It used to be nested onto the finished router by
+    // `serve_http`, landing outside this layer, so a token bought a gated
+    // REST plane and a wide-open tool surface (#47). The stub mounted by the
+    // harness goes through the same `build_router` parameter the real
+    // transport does, so a regression that moves the nest back out lands
+    // here rather than in production.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn bearer_auth_gates_the_data_plane_and_leaves_the_probe_open() {
@@ -1271,6 +1299,31 @@ mod tests {
             401,
             "a bare token with no Bearer prefix must be refused"
         );
+
+        // The MCP surface is behind the same gate, unauthenticated and with
+        // a wrong token alike. This is #47: before the fix both answered 200
+        // and served tools/call.
+        assert_eq!(
+            code(ureq::post(format!("{base}/mcp")).send_json(json!({}))),
+            401,
+            "the MCP surface must be behind the token, not beside it"
+        );
+        assert_eq!(
+            code(
+                ureq::post(format!("{base}/mcp"))
+                    .header("Authorization", &format!("Bearer {near_miss}"))
+                    .send_json(json!({}))
+            ),
+            401,
+            "a wrong token must not reach the MCP surface either"
+        );
+
+        // ...and it is reachable with the right one, so the gate did not
+        // simply break the route. A 401 everywhere would pass a weaker test.
+        let mcp_ok = ureq::post(format!("{base}/mcp"))
+            .header("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(json!({}));
+        assert_eq!(code(mcp_ok), 200, "the configured token must reach /mcp");
 
         // Nothing above was allowed to have landed. Asked with the right
         // token, the store must still be empty — a 401 that wrote anyway is

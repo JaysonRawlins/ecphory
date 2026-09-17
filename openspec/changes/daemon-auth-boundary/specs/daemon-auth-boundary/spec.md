@@ -32,10 +32,12 @@ reports.
 - **WHEN** someone finds that `curl http://127.0.0.1:3491/api/v1/status` answers without a credential
 - **THEN** the README and `SECURITY.md` have already said it does, said why, and said what to set instead, so it is a documented design rather than a finding
 
-### Requirement: The bearer token gates the REST data plane
-When `ECPHORY_AUTH_TOKEN` is set to a non-empty value, every route under
-`/api/v1` SHALL require an `Authorization: Bearer <token>` header whose value
-matches, and SHALL answer `401` otherwise. The comparison SHALL be
+### Requirement: The bearer token gates every surface that touches memories
+When `ECPHORY_AUTH_TOKEN` is set to a non-empty value, every route that reads
+or writes episodes SHALL require an `Authorization: Bearer <token>` header
+whose value matches, and SHALL answer `401` otherwise. This SHALL include the
+MCP transport at `/mcp` as well as `/api/v1`, because the MCP tool surface is
+the same store by another door and gating one without the other buys nothing. The comparison SHALL be
 constant-time. A refused request SHALL have no effect on the store. `/health`
 SHALL remain outside the gate so a supervisor can probe a daemon it holds no
 token for. The CLI commands that read through the daemon SHALL pick the same
@@ -57,24 +59,48 @@ variable up with no extra flag.
 - **WHEN** `/health` is requested with no credential while a token is configured
 - **THEN** it answers `200`
 
-### Requirement: The token's coverage is stated, including where it stops
-The documentation SHALL name the surfaces the token does not cover, so that
-coverage is never inferred from the variable's existence. Specifically it SHALL
-state that `/health` is deliberately open, and that the MCP transport at `/mcp`
-is nested outside the auth layer and is therefore reachable without a
-credential even when the token is set (#47). The token SHALL be described as
-defense in depth for a forwarded port, never as a reason it is safe to forward
-one. A test that pins the REST half SHALL say in the source that it asserts
-nothing about `/mcp`, and the nest site in `src/mcp.rs` SHALL carry the same
-note.
+#### Scenario: The MCP surface
+- **WHEN** an MCP client attempts `initialize`, `tools/list` or `tools/call` against `/mcp` with no credential or a wrong one, while a token is configured
+- **THEN** it is refused with `401`, no tool is listed, and no episode is written
 
-#### Scenario: An operator decides whether to forward the port
-- **WHEN** someone with the token set considers exposing the port through a tunnel or a container port map
-- **THEN** the README tells them the MCP surface is not covered, so the decision is made with the gap visible rather than after discovering it
+#### Scenario: No token configured
+- **WHEN** no `ECPHORY_AUTH_TOKEN` is set
+- **THEN** every surface including `/mcp` answers as it did before the gate existed, so enabling the gate is inert for a deployment that never opted in
 
-#### Scenario: Someone moves the auth layer later
-- **WHEN** a change makes the token cover `/mcp`
-- **THEN** the comments at the test and at the nest site are the two places that name the old carve-out, and both point at #47
+### Requirement: One router owns the boundary
+The auth layer SHALL be applied once, to a single router into which every
+guarded surface is nested, rather than per-surface. A new surface SHALL be
+added by nesting it inside that router; nesting one onto the router returned by
+`build_router` places it outside the gate and SHALL NOT be how a surface is
+mounted. This is a structural requirement rather than a stylistic one: the
+`/mcp` hole existed because the transport was attached by the caller after the
+layer had already been applied, which no reading of either file made obvious.
+
+#### Scenario: A surface is added later
+- **WHEN** a contributor mounts a new transport or admin surface on the daemon
+- **THEN** the signature of `build_router` and the comments at both ends direct them inside the guarded router, and the auth test fails if they mount it outside
+
+#### Scenario: The regression is reintroduced
+- **WHEN** `/mcp` is nested onto the finished router again, as it was before #47
+- **THEN** the bearer-auth test fails on the `/mcp` assertion rather than the change reaching a release
+
+### Requirement: The token's limits are stated where they are read
+The documentation SHALL describe what the token does and does not buy, so its
+value is never inferred from its existence. It SHALL state that `/health` is
+deliberately open; that the token is defense in depth for a forwarded port and
+not a reason to forward one; and that on a single-user machine whose port is
+never forwarded it protects against nobody, because a process running as that
+user can open the store file regardless. It SHALL also warn that a token
+pasted into a client configuration is a plaintext secret adjacent to what it
+protects, and point at dynamic header generation as the better shape.
+
+#### Scenario: A reader decides whether to set it at all
+- **WHEN** someone reads the README's Security section on a single-user laptop
+- **THEN** they are told plainly that the token would protect nobody in that setup, rather than being nudged into managing a secret for no gain
+
+#### Scenario: A reader decides where the token lives
+- **WHEN** someone does need the token and looks for how a client should send it
+- **THEN** the README names a dynamic header command as the way to keep the value out of a config file entirely
 
 ### Requirement: A disclosure channel exists and is private
 The repository SHALL carry a `SECURITY.md` naming a private reporting channel,

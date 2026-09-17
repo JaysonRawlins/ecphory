@@ -12,19 +12,24 @@
 - [x] 1.3 README `Security` section between Install and Status: hard-coded
       loopback bind as the boundary, open-by-default data plane and why,
       `ECPHORY_AUTH_TOKEN` with a generating one-liner, which CLI commands pick
-      it up, what it does not cover (`/health`, `/mcp` per #47), store
-      unencrypted at rest, mirror travels in plaintext.
-- [x] 1.4 Comment at the `/mcp` nest site in `src/mcp.rs` recording that the
-      nest places it outside the bearer gate, with the verified evidence and
-      the issue number, at the line that causes it.
+      it up, `/health` as the one exception, store unencrypted at rest, mirror
+      travels in plaintext. Plus the two things a reader actually needs to
+      decide: that on an unforwarded single-user box the token protects nobody,
+      and that a token in a client config is a plaintext secret next to what it
+      protects, so prefer a dynamic header command.
+- [x] 1.4 `/mcp` moved inside the gate. `build_router` takes the transport as
+      a parameter and nests it beside `/api/v1` under one auth layer;
+      `serve_http` hands it over instead of nesting it onto the finished
+      router. Comments at both ends name #47. Closes #47.
 - [x] 1.5 `spawn_server_with_token(Option<&str>)` test harness;
       `spawn_server_with_state` delegates to it so existing tests are
       unchanged and the auth-on path uses the same `build_router`.
 - [x] 1.6 `bearer_auth_gates_the_data_plane_and_leaves_the_probe_open`.
 - [x] 1.7 CHANGELOG entry under Unreleased.
-- [x] 1.8 No production code changed. Confirmed by diff: all three hunks in
-      `src/http.rs` fall inside `mod tests` (starts line 610; hunks at 636,
-      649, 1191), and `src/mcp.rs` gains comment lines only.
+- [x] 1.8 Production code changed only in router assembly: `build_router`'s
+      signature and nesting, and the `serve_http` call site. No handler, no
+      middleware body, no storage path touched. `require_auth` itself is
+      byte-identical.
 
 ## 2. Red proof (record what was broken and what it printed)
 
@@ -52,8 +57,23 @@
       This is why the test carries an equal-length near miss rather than only
       a wrong token: 2.1 alone would have passed against a broken compare.
 
-- [x] 2.3 Restored, green: `test http::tests::bearer_auth_gates_the_data_plane_and_leaves_the_probe_open ... ok`,
-      and `grep -c "DELIBERATE BREAK" src/http.rs` -> 0.
+- [x] 2.3 The #47 regression itself, staged as the third red. Reinstating the
+      pre-fix shape (layer `/api/v1`, then `.nest("/mcp", ...)` onto the result)
+      turns the new assertion red:
+
+      ```
+      assertion `left == right` failed: the MCP surface must be behind the token, not beside it
+        left: 200
+       right: 401
+      ```
+
+      This is the one that matters: it proves the test would have caught the
+      original bug, rather than merely passing against the fix.
+
+- [x] 2.4 Restored, green: `test http::tests::bearer_auth_gates_the_data_plane_and_leaves_the_probe_open ... ok`,
+      and `grep -c "DELIBERATE BREAK" src/http.rs` -> 0. Full suite 113 tests,
+      0 failures; `cargo fmt --check` and `clippy --all-targets -D warnings`
+      clean.
 
 ## 3. Live verification (against a real daemon, never the live store)
 
@@ -74,15 +94,24 @@
       `{"success":true}` and the write was confirmed by asking the gated REST
       plane with the token (`{"episodes":1}`) on the same store that had just
       answered that caller `401`.
-- [x] 3.3 Filed as #47 with the evidence and the two decisions it needs
-      (whether to move the layer; whether `/health` stays open).
+- [x] 3.3 Filed as #47, then fixed in the same branch once it was clear the
+      change is inert without a token set and therefore breaks nobody.
+- [x] 3.4 Re-probed the fixed binary with the REAL transport, not the stub.
+      Token set: `/health` 200, `/api/v1/status` 401, `/mcp` initialize 401
+      with no header and 401 with a wrong one, 200 with the right one.
+      `tools/list` and `add_memory` unauthenticated both return
+      `{"error":"missing or invalid bearer token"}`, and the store reports
+      `{"episodes":0}` afterwards, so the refused write refused to write.
+- [x] 3.5 Re-probed with NO token set, which is how the author's daemon runs:
+      `/health` 200, `/api/v1/status` 200, `/mcp` initialize 200,
+      `tools/list` 11 tools. Unchanged, so the deployed daemon needs no
+      coordinated config change and the LaunchAgent is untouched.
+- [x] 3.6 `src/http.rs`'s module doc said "Data plane is gated by the opt-in
+      bearer token", which was accurate about `/api/v1` and misleading about
+      everything else. Now names both surfaces, since it is true.
 
 ## 4. Follow-ups, not in this change
 
-- [ ] 4.1 Decide #47. Moving the auth layer over `/mcp` is breaking for every
-      MCP client config that does not send the header, so it wants a release
-      note and a version bump, not a ride-along in a docs change.
-- [ ] 4.2 `src/http.rs`'s own module doc says "Data plane is gated by the
-      opt-in bearer token", which reads as covering more than it does. Left
-      alone here rather than reworded in passing: it is accurate about
-      `/api/v1`, and rewriting it is part of closing #47 either way.
+- [ ] 4.1 Nothing blocking. If the bind address is ever made configurable, the
+      token stops being defense in depth and becomes the only wall, and this
+      spec's first requirement is the one to revisit.

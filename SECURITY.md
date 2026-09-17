@@ -34,8 +34,9 @@ Inside that boundary the data plane is open unless you opt in to
 machine can open `~/.local/share/ecphory/ecphory.redb` directly, so a gate on
 the port would not be protecting the store from it. The token matters when the
 port stops being loopback-only, which is usually not ecphory's doing: an SSH
-tunnel, a container port map, a VM forward. See the README's Security section
-for how to set it and exactly what it covers.
+tunnel, a container port map, a VM forward. When set it gates every route but
+`/health`, REST and MCP alike. See the README's Security section for how to set
+it, and for why a token pasted into a client config is worth avoiding.
 
 At rest the store is an ordinary unencrypted file whose protection is
 filesystem permissions. The flight recorder tapes real queries and episode ids,
@@ -47,7 +48,11 @@ travel wherever that repository is pushed.
 
 - Anything that lets code reach the store or the daemon that should not: a path
   that escapes the loopback bind, a way to make the daemon listen elsewhere.
-- Bearer auth bypass on `/api/v1/*` when `ECPHORY_AUTH_TOKEN` is set.
+- Bearer auth bypass on any gated surface when `ECPHORY_AUTH_TOKEN` is set.
+  That is every route except `/health`, REST and MCP alike. A way to reach
+  `/mcp` without the header is in scope; it was open until
+  [#47](https://github.com/JaysonRawlins/ecphory/issues/47) and is exactly
+  the shape worth looking for again.
 - A panic, hang, or memory-safety fault reachable from a well-formed request,
   a crafted episode, or a corrupt store file.
 - Secrets or episode content escaping somewhere you would not expect them:
@@ -60,9 +65,6 @@ travel wherever that repository is pushed.
 - **The data plane being open by default on loopback.** Documented above and in
   the README, and working as intended. A report that `curl` against
   `127.0.0.1:3491` returns episodes without a token is this, not a finding.
-- **`/mcp` not being behind `ECPHORY_AUTH_TOKEN`.** Known and tracked in
-  [#47](https://github.com/JaysonRawlins/ecphory/issues/47), and stated in the README rather than left for you to
-  discover.
 - **Another user on a shared machine reading the store file.** Filesystem
   permissions are the boundary there, and ecphory does not try to add a second
   one.
