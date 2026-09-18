@@ -31,3 +31,44 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --target x86_64-pc-windows-msvc
+
+  # Guards the archive-format decision in dist-workspace.toml.
+  #
+  # dist's generated installer preflights `tar` but never `xz`, so a .tar.xz
+  # artifact makes `curl | sh` die inside tar on any image that has tar but
+  # not xz — debian:bookworm-slim and ubuntu:24.04 both do. See "Install
+  # smoke test" in docs/RELEASING.md for the failure and the evidence.
+  #
+  # This asserts on `dist plan` rather than grepping the toml so that a dist
+  # upgrade quietly restoring the .tar.xz default is caught too. It checks
+  # both directions: nothing may be .tar.xz, and the musl artifacts must
+  # actually be present as .tar.gz, so a rename cannot make it pass vacuously.
+  archive-format:
+    name: unix artifacts are .tar.gz
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - name: Assert no .tar.xz artifacts
+        run: |
+          set -euo pipefail
+          names=$(dist plan --output-format=json \
+            | jq -r '.artifacts | to_entries[] | .value.name // empty')
+
+          xz=$(printf '%s\n' "$names" | grep '\.tar\.xz$' || true)
+          if [ -n "$xz" ]; then
+            echo "::error::dist plan produces .tar.xz; curl | sh then fails on debian/ubuntu (no xz). Set unix-archive = \".tar.gz\" in dist-workspace.toml."
+            printf '%s\n' "$xz"
+            exit 1
+          fi
+
+          for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            printf '%s\n' "$names" | grep -qx "ecphory-$target.tar.gz" || {
+              echo "::error::expected ecphory-$target.tar.gz in the plan; got:"
+              printf '%s\n' "$names"
+              exit 1
+            }
+          done
+
+          echo "OK — no .tar.xz, both musl artifacts are .tar.gz"
