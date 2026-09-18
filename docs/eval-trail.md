@@ -97,17 +97,15 @@ gold reading:
 
 | Date | Heals | Held | Regressed |
 | --- | --- | --- | --- |
-| 2026-07-16 | 2 | 2 | 0 |
+| 2026-07-17 | 2 | 2 | 0 |
 | 2026-09-18 | 48 | 47 | 1 |
 
 **Do not treat a non-zero exit here as a deploy gate.** A heal can regress
 because a *better* sibling was written later, which is the store working, not
-failing. The 2026-09-18 regression is exactly that: query
-`argocd-applications chart values envs global Arg…` → `01a0a278`, which now
-ranks nowhere in the top 8 because `bb835474` ("argocd-applications helm chart
-architecture", score 57.62) was written since and is the better answer for that
-query text. Compare against the recorded row instead: *more* regressions than
-the last reading is the signal.
+failing. The 2026-09-18 regression is exactly that: the heal targeting
+`01a0a278` now ranks nowhere in the top 8 for its query, because `bb835474` was
+written since and scores 57.62 against it. Compare against the recorded row
+instead: *more* regressions than the last reading is the signal.
 
 ## Adding a row
 
@@ -130,9 +128,8 @@ verbatim eval output.**
 
 The gold set is a private corpus — its queries name real clients, people and
 ticket ids, and this repository is public. Episode ids are opaque and safe to
-record, which is why the miss set above is tracked by id. The one exception
-already made is `bb835474`'s title, which describes this repository's own
-subject matter and nothing else.
+record, which is why every miss and heal above is tracked by id and never by
+the text that found it.
 
 ## Known gaps
 
