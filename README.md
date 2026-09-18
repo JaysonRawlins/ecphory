@@ -200,9 +200,12 @@ cargo binstall ecphory   # prebuilt, no compile
 cargo install ecphory --locked   # compiles from source
 ```
 
-Manual download on macOS: clear quarantine before first run
-(`xattr -c ecphory`) — Homebrew and the installer script handle this for
-you. Binaries are ad-hoc signed; notarization is future work.
+Manual download on macOS: a binary fetched with a **browser** carries the
+quarantine xattr and Gatekeeper will block it, so clear it before first run
+(`xattr -c ecphory`). Homebrew strips it for you. The `curl | sh` installer
+never trips it either — not because it clears the attribute, but because
+curl does not set one. Binaries are ad-hoc signed; notarization is future
+work.
 
 See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
 
