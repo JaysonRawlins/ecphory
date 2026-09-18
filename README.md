@@ -75,6 +75,32 @@ writes a `resolution_log` row, which is **exempt from the 90-day recorder
 prune** — every healed miss becomes a permanent regression test. `ecphory eval
 --heals` replays them all and exits non-zero if any heal has regressed.
 
+## Provenance: who wrote this
+
+Three fields ride along with every episode, and they answer three different
+questions:
+
+| field | holds | examples |
+| --- | --- | --- |
+| `source` | the writing **system** — agent, harness or tool | `claude-code`, `codex`, `teachme` |
+| `source_model` | the **model**, alone | `claude-opus-5`, `claude-opus-5[1m]`, `gpt-5` |
+| `source_description` | free text: the session, task or run | `"issue #41 repair, 2026-09-17"` |
+
+One name in `source`, never a `system/model` compound: folding the model in is
+what makes a later `GROUP BY source_model` quietly undercount. Never blank
+either — when the writing system genuinely isn't known, the honest value is the
+literal `unknown`, because a query can count `unknown` and cannot count `""`.
+Record the model as your harness reports it, context-window marker included:
+`claude-opus-5[1m]` was true at write time, and nothing downstream can recover
+that afterwards.
+
+None of this is enforced on write. Axiom 3 — the server stores what the edge
+gives it — applies to provenance as much as to content, so the convention is
+written where an agent actually reads it (the MCP tool schema) rather than
+checked in a validator. The counterweight is that all three fields stay
+correctable for the life of the episode, archived and reversible like every
+other field.
+
 ## Deletion story
 
 Deletion is two-phase, and the phases have different owners:
@@ -162,8 +188,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JaysonRawlins/ecphory/r
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/JaysonRawlins/ecphory/releases/latest/download/ecphory-installer.ps1 | iex"
 ```
 
-winget is packaged and awaiting its first submission to winget-pkgs; the
-portable exe works today from the Release zip. See
+winget packaging is submitted and awaiting review
+([winget-pkgs#436333](https://github.com/microsoft/winget-pkgs/pull/436333));
+until it merges, the portable exe works today from the Release zip. See
 [docs/packaging/winget](docs/packaging/winget/).
 
 **cargo-binstall / from source:**
@@ -179,6 +206,179 @@ you. Binaries are ad-hoc signed; notarization is future work.
 
 See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
 
+## Connect an agent
+
+Installing the binary gets you nothing until an agent can reach it. There are
+two transports, and one rule decides which you want: **redb's lock is
+process-exclusive, so exactly one process may hold the store.**
+
+- `ecphory serve` — MCP over streamable HTTP at `http://127.0.0.1:3491/mcp`.
+  One daemon owns the store and every client dials the URL. This is what you
+  want the moment there is more than one agent, or one agent and the CLI.
+- `ecphory mcp` — MCP over stdio. The client spawns the binary and *that*
+  process opens the store, so it is single-client by construction.
+
+Mixing them fails loudly, which is the merciful case: start a stdio client
+while the daemon is up and it exits with `Error: storage error: Database
+already open. Cannot acquire lock.` Run the daemon and point everything at
+the URL, or run exactly one stdio client and no daemon.
+
+### 1. Start the daemon
+
+```sh
+ecphory serve                           # 127.0.0.1:3491, foreground
+curl -s http://127.0.0.1:3491/health    # {"status":"healthy"}
+```
+
+The store is `$ECPHORY_DB`, else `~/.local/share/ecphory/ecphory.redb` —
+never relative to the working directory, because a server started from the
+wrong place would otherwise silently create a second empty store. The daemon
+binds loopback only.
+
+### 2. Wire the client
+
+**Claude Code** — one command:
+
+```sh
+claude mcp add --transport http --scope user ecphory http://127.0.0.1:3491/mcp
+```
+
+or, equivalently, by hand in `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "ecphory": { "type": "http", "url": "http://127.0.0.1:3491/mcp" }
+  }
+}
+```
+
+**Codex** — `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.ecphory]
+url = "http://127.0.0.1:3491/mcp"
+```
+
+**Claude Desktop** — `claude_desktop_config.json` (macOS:
+`~/Library/Application Support/Claude/`) launches a command rather than
+dialing a URL, so its entry is the stdio one — which means it must be the
+only process holding the store, so stop the daemon first. Give it an
+absolute path: a GUI app does not inherit your shell's `PATH`.
+
+```json
+{
+  "mcpServers": {
+    "ecphory": {
+      "command": "/Users/you/.local/bin/ecphory",
+      "args": ["mcp"],
+      "env": { "ECPHORY_DB": "/Users/you/.local/share/ecphory/ecphory.redb" }
+    }
+  }
+}
+```
+
+Any other client follows the same split: if it accepts a URL, hand it
+`http://127.0.0.1:3491/mcp`; if it only spawns a command, hand it
+`ecphory mcp` and let nothing else hold the store.
+
+### 3. Confirm the connection
+
+The daemon answers `tools/list` without a session handshake, so a single
+curl proves the whole path end to end:
+
+```sh
+curl -s -X POST http://127.0.0.1:3491/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+A healthy daemon returns 11 tools: `add_memory`, `search`, `rate_search`,
+`get_episode`, `get_episodes`, `get_status`, `update_episode`,
+`delete_episode`, `restore_episode`, `get_episode_versions`,
+`restore_episode_version`.
+
+Client-side, Claude Code's `/mcp` lists ecphory as connected. The real
+end-to-end check is to ask the agent to store something and then search it
+back — and then, because the store's whole thesis is measured recall, to
+rate that search.
+
+One CLI surprise worth knowing before it bites: while the daemon holds the
+lock, most `ecphory` subcommands cannot open the store and fail with that
+same `Database already open`. The recorder views (`search-log`, `access-log`,
+`ratings`, `heals`), `render-index` and `eval` read through the daemon over
+HTTP instead, and anything else against a live store goes through REST —
+`curl http://127.0.0.1:3491/api/v1/status` is the running daemon's answer to
+`ecphory status`.
+
+Connecting makes the store *reachable*. Making it *findable* is the subject
+index above: `ecphory render-index` puts the recall keys in front of the
+agent, so it knows what to ask for.
+
+### 4. Keep it running
+
+macOS, as a LaunchAgent at
+`~/Library/LaunchAgents/com.ecphory.server.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ecphory.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.local/bin/ecphory</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ECPHORY_DB</key>
+    <string>/Users/you/.local/share/ecphory/ecphory.redb</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/.local/share/ecphory/serve.err</string>
+</dict>
+</plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u) <plist>`, restart it after an
+upgrade with `launchctl kickstart -k gui/$(id -u)/com.ecphory.server`.
+
+Linux, as a systemd user unit
+(`~/.config/systemd/user/ecphory.service`):
+
+```ini
+[Service]
+ExecStart=%h/.local/bin/ecphory serve
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now ecphory`.
+
+### Configuration
+
+Everything is environment variables, read by the daemon at startup:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ECPHORY_DB` | `~/.local/share/ecphory/ecphory.redb` | Store path. Never resolved against the cwd. |
+| `ECPHORY_PORT` | `3491` | Port for `serve`. Loopback only. |
+| `ECPHORY_URL` | `http://127.0.0.1:3491` | Daemon the CLI's HTTP-backed commands dial. |
+| `ECPHORY_AUTH_TOKEN` | unset (open) | Bearer token for the data plane, REST and MCP alike; `/health` stays open for probes. Loopback binding is the wall, this is depth for when the port gets forwarded. See [Security](#security). |
+| `ECPHORY_HIDDEN_GROUPS` | unset | Comma-separated groups an unscoped search skips; naming one in `group_id` opts back in. |
+| `ECPHORY_EXPORT_DIR` | unset (no mirror) | Git mirror directory. Set it and the daemon exports on a schedule. See [docs/backups.md](docs/backups.md). |
+| `ECPHORY_EXPORT_INTERVAL` | `24h` | How often that scheduled export runs. |
+| `ECPHORY_EXPORT_PUSH` | on | `false`/`0`/`off` to commit the mirror without pushing it. |
+| `ECPHORY_TRIGGERS_FILE` | unset | Post-write trigger definitions. See [docs/triggers.md](docs/triggers.md). |
+| `ECPHORY_SEARCH_LOG` | on | `off`/`false`/`0`/`disabled` turns the flight recorder off — which turns off every measurement this project exists for. |
+| `ECPHORY_SEARCH_LOG_RETENTION` | `90` (days) | Recorder prune horizon. Heal resolutions are exempt. |
 ## Security
 
 The daemon binds `127.0.0.1`, and only `127.0.0.1`. That is hard-coded at the
@@ -228,7 +428,7 @@ vulnerability privately.
 
 ## Status
 
-v0.3.5. Canonical store, tantivy BM25 search with write-time phrase boosting,
+v0.3.7. Canonical store, tantivy BM25 search with write-time phrase boosting,
 flight recorder, MCP daemon (stdio + streamable HTTP), REST mirror, eval
 harness (gold-set, used-signal, and `--from-log` against the real workload),
 git mirror export/import. Since v0.3.3 the recorder closes the loop: explicit
@@ -236,17 +436,15 @@ search ratings drive the self-correction cycle described above, validated
 heals are kept as permanent regression tests (`eval --heals`), and
 tape entries carry an `origin` tag so eval and backfill sweeps stay out of the
 organic workload statistics. Two-phase deletion (agent demote, operator purge)
-landed in v0.3.4.
+landed in v0.3.4. v0.3.7 added the subject index, made provenance
+correctable after the fact, and converged the search index on a document
+count instead of a wildcard probe that read every index as empty — which
+took `ecphory search` on a 900-episode store from 390 ms to 54 ms
+([#37](https://github.com/JaysonRawlins/ecphory/pull/37)). See
+[CHANGELOG.md](CHANGELOG.md).
 
 Running in production as the author's daily-driver agent memory since
 2026-07-12.
-
-Known gaps: every open of a non-empty store reindexes it wholesale, because the
-cold-start emptiness probe tokenizes to nothing and so reads every index as
-empty ([#30](https://github.com/JaysonRawlins/ecphory/issues/30)). It is
-invisible at the current corpus size, and that accidental rebuild is what
-repairs index drift today, which makes it a two-part fix rather than a
-one-liner.
 
 ## Lineage
 

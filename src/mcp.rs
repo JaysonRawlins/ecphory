@@ -53,11 +53,19 @@ pub struct AddMemoryRequest {
     /// don't know the answer's vocabulary. These are boosted in search.
     #[serde(default)]
     pub search_phrases: Vec<String>,
-    /// Originating system, e.g. "claude-code".
+    /// The writing system, and only that: the agent, harness or tool that
+    /// captured this — "claude-code", "codex", "teachme". One name, never a
+    /// "system/model" compound; the model belongs in `source_model`. Say
+    /// "unknown" rather than leaving it blank.
     #[serde(default)]
     pub source: String,
+    /// The model that did the writing, and only that: "claude-opus-5",
+    /// "claude-opus-5[1m]", "gpt-5". Give it as your harness reports it,
+    /// context-window marker included — that is what was true at write time,
+    /// and nothing downstream can recover it later.
     #[serde(default)]
     pub source_model: String,
+    /// Free text: the session, task or run this came out of.
     #[serde(default)]
     pub source_description: String,
     #[serde(default)]
@@ -171,11 +179,12 @@ pub struct UpdateEpisodeRequest {
     /// Replacement tags; empty means leave unchanged.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Corrected originating system, e.g. "claude-code"; empty means leave
-    /// unchanged.
+    /// Corrected writing system, e.g. "claude-code" — one name, never a
+    /// "system/model" compound; empty means leave unchanged.
     #[serde(default)]
     pub source: String,
-    /// Corrected capturing model; empty means leave unchanged.
+    /// Corrected writing model, alone, e.g. "claude-opus-5"; empty means
+    /// leave unchanged.
     #[serde(default)]
     pub source_model: String,
     /// Corrected source description; empty means leave unchanged.

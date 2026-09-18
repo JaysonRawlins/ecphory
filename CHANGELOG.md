@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/JaysonRawlins/ecphory/compare/v0.3.6...v0.3.7) - 2026-09-17
+
+### Added
+
+- subject index — render a workspace's recall keys into AGENTS.md and MEMORY.md ([#34](https://github.com/JaysonRawlins/ecphory/pull/34))
+
+### Fixed
+
+- *(update)* make source, source_model and source_description updatable ([#40](https://github.com/JaysonRawlins/ecphory/pull/40))
+- *(index)* converge the index by document count, not a wildcard search ([#37](https://github.com/JaysonRawlins/ecphory/pull/37))
+
+### Other
+
+- *(provenance)* say what belongs in source and source_model, where it is read ([#48](https://github.com/JaysonRawlins/ecphory/pull/48))
+- *(packaging)* add the winget package ([#46](https://github.com/JaysonRawlins/ecphory/pull/46))
+- contribution policy and branch-protection rulesets for the public repo ([#45](https://github.com/JaysonRawlins/ecphory/pull/45))
+- *(openspec)* archive rating-telemetry ([#44](https://github.com/JaysonRawlins/ecphory/pull/44))
+- *(ratings)* name the field that mutates, and pin it at the wire ([#43](https://github.com/JaysonRawlins/ecphory/pull/43))
+- *(openspec)* archive updatable-provenance ([#42](https://github.com/JaysonRawlins/ecphory/pull/42))
+- *(openspec)* archive index-convergence ([#38](https://github.com/JaysonRawlins/ecphory/pull/38))
+- *(openspec)* archive subject-index ([#36](https://github.com/JaysonRawlins/ecphory/pull/36))
+
 ### Added
 
 - subject index: `ecphory render-index` writes a workspace's recall keys into `AGENTS.md` (the file codex, agy and OpenCode read) and Claude Code's per-project `MEMORY.md`, inside an idempotent marked region; `ecphory workspace-key` prints the `ws:<slug>` tag that scopes an episode to a workspace; `GET /memory/episodes?tags=` filters a listing (#24)
@@ -19,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- *(provenance)* write the `source` / `source_model` / `source_description` convention down where an agent reads it. `source_model` and `source_description` carried no schema description at all, so the only guidance a writing agent ever got was `source`'s "Originating system" — and the store drifted into two conventions for the same fact: 12 episodes fold the model into `source` with a slash (`claude-code/opus-4-7`), 11 leave `source` empty, and `opus-4-7` is a spelling of `opus-4.7` that is neither the API id nor the human short form. All three fields now say what belongs in them on the MCP `add_memory` and `update_episode` schemas, the REST body and the CLI, and the README states the convention for humans. Nothing is validated on write — axiom 3 holds for provenance too — so this is documentation plus a one-off repair of the 48 affected episodes in the reference deployment, not a behaviour change (#41)
 - *(security)* add `SECURITY.md` and document the daemon's boundary. The repo went public with no disclosure channel, so a vulnerability report's only route into a memory store was a public issue; private vulnerability reporting is now enabled and `SECURITY.md` carries the threat model and an in-scope/out-of-scope list. `ECPHORY_AUTH_TOKEN` was undocumented everywhere a user reads, which left an open-by-default data plane looking like an oversight rather than a design: the README now says the hard-coded loopback bind is the boundary, why the plane is open inside it, how to set the token, and the two things a reader needs to decide — that on an unforwarded single-user machine it protects nobody, and that a token pasted into a client config is a plaintext secret next to what it protects
 - *(ratings)* say plainly, on every rating surface, that `used_episode_ids` is telemetry and `intended_episode_ids` is the only field that edits an episode, and pin that promise at the wire with a regression test — a `partial` carrying used ids only must leave every episode it names untouched. The behaviour shipped in 0.3.6; only the contract was unwritten (#18)
 
