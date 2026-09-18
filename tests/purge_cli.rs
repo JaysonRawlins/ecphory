@@ -120,9 +120,11 @@ fn purge_end_to_end() {
 
     // The mirror removal was committed (the mirror was already a git repo).
     let log = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .arg("-C")
         .arg(mirror.path())
-        .args(["log", "--oneline"])
+        .args(["log", "--oneline", "--all"])
         .output()
         .unwrap();
     let log_text = String::from_utf8_lossy(&log.stdout).into_owned();

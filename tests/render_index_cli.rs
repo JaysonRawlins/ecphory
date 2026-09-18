@@ -42,8 +42,15 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// Hermetic: a fixture repo must not inherit the developer's git config.
+/// `core.hooksPath` is global, so a commit-msg hook policing authorship
+/// applies to this throwaway repo and fails the test for a reason that has
+/// nothing to do with index rendering. Same for gpgsign and templates. CI
+/// passes without this only because CI has none of them.
 fn git(cwd: &Path, args: &[&str]) {
     let out = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .arg("-C")
         .arg(cwd)
         .args(args)

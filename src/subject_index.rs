@@ -598,8 +598,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main");
         std::fs::create_dir_all(&main).unwrap();
+        // Hermetic: the fixture must not inherit the developer's git config.
+        // A global `core.hooksPath` (or `commit.gpgsign`, or a message
+        // template) applies to every repo on the machine including this
+        // temp one, and a commit-msg hook that rejects the fixture's
+        // trailer-less "init" fails the test for a reason that has nothing
+        // to do with workspace resolution. CI passes only because CI has no
+        // such config.
         let git = |args: &[&str], cwd: &Path| {
             let out = std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
