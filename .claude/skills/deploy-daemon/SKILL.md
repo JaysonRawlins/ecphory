@@ -2,7 +2,7 @@
 name: deploy-daemon
 description: Deploy the local ecphory daemon from source and verify it BEHAVIORALLY. Use whenever a change should go live on the running daemon (after a merge, "restart the daemon", "put this live", "bounce ecphory"), or when diagnosing whether the running daemon actually contains a change. The core rule — version strings lie, behavioral probes don't — exists because a fresh install once reported the right-looking version while running fix-less code.
 metadata:
-  version: 1.0.0
+  version: 1.1.0
 disable-model-invocation: false
 ---
 
@@ -28,9 +28,28 @@ on port 3491, db at `~/.local/share/ecphory/ecphory.redb`.
    then confirm a NEW pid: `ps aux | grep "ecphory serve" | grep -v grep`
 5. **Verify behaviorally — this is the load-bearing step:**
    - `ecphory --version` (necessary, not sufficient)
-   - `ecphory eval --gold ~/.local/share/ecphory/gold.jsonl` — compare against
-     the known baseline (as of v0.3.3: 3 misses, MRR 0.928, hit@5 98.9%).
-     A regression here after a "successful" deploy means the wrong code is live.
+   - **The floor gate (machine).** Exits non-zero below the floor:
+     `ecphory eval --gold ~/.local/share/ecphory/gold.jsonl --min-mrr 0.85`
+     It answers exactly one question — *is the right code live?* — and it is
+     loose on purpose so it cannot fire on corpus growth.
+   - **The drift read (human).** Compare that run against the LAST ROW of
+     [`docs/eval-trail.md`](../../../docs/eval-trail.md), then append your
+     reading as a new row, in the same commit as the deploy.
+     Note what is deliberately absent here: a baseline number. One used to
+     live in this step — "as of v0.3.3: 3 misses, MRR 0.928, hit@5 98.9%" —
+     and by 2026-09 it reported a regression on every deploy, because the gold
+     set is fixed at 275 pairs while the corpus grew ~480 episodes and misses
+     accumulate from crowding alone. **Do not re-add a number here.** The trail
+     file is the baseline precisely because it gets appended to and this one
+     does not.
+   - **Index freshness — the eval does NOT cover this.** Since #37 the index
+     converges on a document-count comparison instead of rebuilding on every
+     open, so a genuinely drifted index can persist where the old accidental
+     rebuild would have repaired it. The cheap probe: search for an episode
+     written TODAY and confirm it ranks.
+   - `ecphory eval --heals` — record held/regressed against the trail's second
+     table. A non-zero exit here is NOT a deploy blocker; a heal can regress
+     because a better sibling was written later. The trail says which.
    - If the change touched a specific behavior, probe THAT PATH over HTTP
      (port 3491) — e.g. the self-correction loop has a zero-pollution smoke:
      rate a rank-1 search as miss with its own id in intended_episode_ids and
@@ -45,3 +64,6 @@ on port 3491, db at `~/.local/share/ecphory/ecphory.redb`.
   they reconnect.
 - Restarting drops every active session's memory connection for a moment —
   fine, they reconnect; just don't bounce mid-write.
+- The gold set is NOT in this repo. It lives at
+  `~/.local/share/ecphory/gold.jsonl` in a single unversioned copy — see
+  "Known gaps" in [`docs/eval-trail.md`](../../../docs/eval-trail.md).
