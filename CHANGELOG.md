@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/JaysonRawlins/ecphory/compare/v0.3.6...v0.3.7) - 2026-09-17
+
+### Added
+
+- subject index — render a workspace's recall keys into AGENTS.md and MEMORY.md ([#34](https://github.com/JaysonRawlins/ecphory/pull/34))
+
+### Fixed
+
+- *(update)* make source, source_model and source_description updatable ([#40](https://github.com/JaysonRawlins/ecphory/pull/40))
+- *(index)* converge the index by document count, not a wildcard search ([#37](https://github.com/JaysonRawlins/ecphory/pull/37))
+
+### Other
+
+- *(provenance)* say what belongs in source and source_model, where it is read ([#48](https://github.com/JaysonRawlins/ecphory/pull/48))
+- *(packaging)* add the winget package ([#46](https://github.com/JaysonRawlins/ecphory/pull/46))
+- contribution policy and branch-protection rulesets for the public repo ([#45](https://github.com/JaysonRawlins/ecphory/pull/45))
+- *(openspec)* archive rating-telemetry ([#44](https://github.com/JaysonRawlins/ecphory/pull/44))
+- *(ratings)* name the field that mutates, and pin it at the wire ([#43](https://github.com/JaysonRawlins/ecphory/pull/43))
+- *(openspec)* archive updatable-provenance ([#42](https://github.com/JaysonRawlins/ecphory/pull/42))
+- *(openspec)* archive index-convergence ([#38](https://github.com/JaysonRawlins/ecphory/pull/38))
+- *(openspec)* archive subject-index ([#36](https://github.com/JaysonRawlins/ecphory/pull/36))
+
 ### Added
 
 - subject index: `ecphory render-index` writes a workspace's recall keys into `AGENTS.md` (the file codex, agy and OpenCode read) and Claude Code's per-project `MEMORY.md`, inside an idempotent marked region; `ecphory workspace-key` prints the `ws:<slug>` tag that scopes an episode to a workspace; `GET /memory/episodes?tags=` filters a listing (#24)
