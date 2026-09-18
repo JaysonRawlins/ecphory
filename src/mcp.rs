@@ -615,22 +615,23 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
         // (anthropics/claude-code#30426), which strict streamable-HTTP
         // servers 406 — the failure is silent client-side ("tools fetch
         // failed"). Be liberal: inject the header on every inbound request.
-        let router = crate::http::build_router(state).nest_service(
-            "/mcp",
-            axum::Router::new().fallback_service(service).layer(
-                axum::middleware::map_request(
-                    |mut req: axum::http::Request<axum::body::Body>| async {
-                        req.headers_mut().insert(
-                            axum::http::header::ACCEPT,
-                            axum::http::HeaderValue::from_static(
-                                "application/json, text/event-stream",
-                            ),
-                        );
-                        req
-                    },
-                ),
+        let mcp = axum::Router::new().fallback_service(service).layer(
+            axum::middleware::map_request(
+                |mut req: axum::http::Request<axum::body::Body>| async {
+                    req.headers_mut().insert(
+                        axum::http::header::ACCEPT,
+                        axum::http::HeaderValue::from_static(
+                            "application/json, text/event-stream",
+                        ),
+                    );
+                    req
+                },
             ),
         );
+        // Handed to `build_router` rather than nested onto its result: that
+        // is what puts /mcp inside the bearer gate instead of beside it
+        // (#47). Do not go back to `.nest_service` on the finished router.
+        let router = crate::http::build_router(state, Some(mcp));
         // Loopback only: single-user local daemon, no remote surface.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         tracing::info!("ecphory MCP listening on http://127.0.0.1:{port}/mcp");

@@ -374,7 +374,7 @@ Everything is environment variables, read by the daemon at startup:
 | `ECPHORY_DB` | `~/.local/share/ecphory/ecphory.redb` | Store path. Never resolved against the cwd. |
 | `ECPHORY_PORT` | `3491` | Port for `serve`. Loopback only. |
 | `ECPHORY_URL` | `http://127.0.0.1:3491` | Daemon the CLI's HTTP-backed commands dial. |
-| `ECPHORY_AUTH_TOKEN` | unset (open) | Bearer token for the REST data plane (`/api/v1/**`). `/health` and `/mcp` are not behind it ([#47](https://github.com/JaysonRawlins/ecphory/issues/47)) — loopback binding is the wall; this is depth for when the port gets forwarded. |
+| `ECPHORY_AUTH_TOKEN` | unset (open) | Bearer token for the data plane, REST and MCP alike; `/health` stays open for probes. Loopback binding is the wall, this is depth for when the port gets forwarded. See [Security](#security). |
 | `ECPHORY_HIDDEN_GROUPS` | unset | Comma-separated groups an unscoped search skips; naming one in `group_id` opts back in. |
 | `ECPHORY_EXPORT_DIR` | unset (no mirror) | Git mirror directory. Set it and the daemon exports on a schedule. See [docs/backups.md](docs/backups.md). |
 | `ECPHORY_EXPORT_INTERVAL` | `24h` | How often that scheduled export runs. |
@@ -382,6 +382,52 @@ Everything is environment variables, read by the daemon at startup:
 | `ECPHORY_TRIGGERS_FILE` | unset | Post-write trigger definitions. See [docs/triggers.md](docs/triggers.md). |
 | `ECPHORY_SEARCH_LOG` | on | `off`/`false`/`0`/`disabled` turns the flight recorder off — which turns off every measurement this project exists for. |
 | `ECPHORY_SEARCH_LOG_RETENTION` | `90` (days) | Recorder prune horizon. Heal resolutions are exempt. |
+## Security
+
+The daemon binds `127.0.0.1`, and only `127.0.0.1`. That is hard-coded at the
+listener rather than offered as a flag or an environment variable — `--port`
+and `$ECPHORY_PORT` move the port, nothing moves the address — so there is no
+configuration of ecphory that serves your memories to a network. The loopback
+binding is the boundary, and it is what is actually protecting the store.
+
+Inside that boundary the data plane is open by default: anything that can reach
+the port can read, write and delete episodes. That is deliberate for a
+single-user local daemon. A process running as you can already open the store
+file directly, so a gate on the port would not be keeping it out of anything.
+
+Set `ECPHORY_AUTH_TOKEN` to require a bearer token on top of that:
+
+```sh
+ECPHORY_AUTH_TOKEN=$(openssl rand -hex 32) ecphory serve
+```
+
+It covers both surfaces, REST and MCP. `/health` is the single exception, left
+open so a supervisor can probe a daemon it holds no token for. The CLI reads
+the same variable, so the commands that go through the daemon — `search-log`,
+`access-log`, `ratings`, `heals`, `eval`, `render-index` — keep working with no
+extra flag, and an MCP client sends `Authorization: Bearer <token>` like any
+other client.
+
+Where the client gets that token from is worth a thought, because a token
+pasted into a config file is a plaintext secret sitting next to the thing it
+protects. If your MCP client can generate headers by running a command, use
+that instead: Claude Code's `headersHelper` runs on every connection and merges
+its output into the request headers, so the value can come from your secret
+manager at connect time and never be written to a file at all.
+
+Be honest with yourself about whether you want it at all. On a single-user
+machine whose port is never forwarded, the token protects against nobody — a
+process running as you can open the store file directly, token or no token. The
+case it exists for is the port ceasing to be loopback-only: an SSH tunnel, a
+container port map, a VM forward. It is what stands between a reachable port
+and your memories in that situation, which is different from being a reason to
+put it in one.
+
+At rest the store is an ordinary unencrypted file protected by filesystem
+permissions, and turning on the git mirror (`ECPHORY_EXPORT_DIR`) writes your
+episodes to that repository in plaintext, where they travel with it.
+[SECURITY.md](SECURITY.md) has the full threat model and how to report a
+vulnerability privately.
 
 ## Status
 
@@ -402,14 +448,6 @@ took `ecphory search` on a 900-episode store from 390 ms to 54 ms
 
 Running in production as the author's daily-driver agent memory since
 2026-07-12.
-
-Known gaps: `ECPHORY_AUTH_TOKEN` gates the REST data plane and not the MCP
-surface at `/mcp`, so setting it protects less than it looks like it does
-([#47](https://github.com/JaysonRawlins/ecphory/issues/47)). The blast
-radius is bounded by the listener rather than the token — `serve` binds
-`127.0.0.1` and the address is hard-coded — so a default install is not
-remotely reachable. It matters in exactly the case the token exists for: a
-forwarded port, a tunnel, a container port map.
 
 ## Lineage
 
