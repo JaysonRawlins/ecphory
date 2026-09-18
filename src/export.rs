@@ -138,12 +138,23 @@ pub fn git_commit(dir: &Path, message: &str) -> Result<bool> {
 
     // Fixed identity: exports are machine-generated, and the daemon must
     // be able to commit on hosts with no global git config (CI, containers).
+    //
+    // --no-verify for the same reason one level up: a mirror commit is a
+    // machine snapshot, not an authored change, and the operator's hooks
+    // are written to police authorship. A global `core.hooksPath` applies
+    // to every repo on the box including this one, so a commit-msg hook
+    // that demands a trailer — or a pre-commit that lints a source tree
+    // this mirror is not — silently turns the backup path into an error.
+    // The push keeps its hooks: the commit is local bookkeeping, the push
+    // is what leaves the machine and is where a guard still earns its
+    // place.
     let commit = git(&[
         "-c",
         "user.name=ecphory",
         "-c",
         "user.email=ecphory@localhost",
         "commit",
+        "--no-verify",
         "-q",
         "-m",
         message,
@@ -271,8 +282,13 @@ mod tests {
         // No remote yet: push is a clean no-op, not an error.
         assert!(!git_push(&mirror).unwrap());
 
+        // Hermetic: fixtures must not inherit the developer's git config
+        // (hooks, gpgsign, templates). CI passes without this only because
+        // CI has none of them.
         let sh = |dir: &Path, args: &[&str]| {
             let out = std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .arg("-C")
                 .arg(dir)
                 .args(args)
@@ -288,7 +304,11 @@ mod tests {
         );
 
         assert!(git_push(&mirror).unwrap());
-        let log = sh(&bare, &["log", "--oneline"]);
+        // --all, not HEAD: the bare repo's default branch and the mirror's
+        // need not agree once neither is reading a developer's
+        // init.defaultBranch, and what is under test is that the commit
+        // arrived at all.
+        let log = sh(&bare, &["log", "--oneline", "--all"]);
         assert!(String::from_utf8_lossy(&log.stdout).contains("first"));
     }
 
