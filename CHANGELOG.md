@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/JaysonRawlins/ecphory/compare/v0.3.7...v0.3.8) - 2026-09-18
+
+### Fixed
+
+- *(dist)* ship unix artifacts as .tar.gz so curl | sh works on debian and ubuntu ([#51](https://github.com/JaysonRawlins/ecphory/pull/51))
+
+### Other
+
+- *(readme)* wire an agent to the daemon, and correct the stale facts ([#52](https://github.com/JaysonRawlins/ecphory/pull/52))
+- *(openspec)* archive provenance-conventions ([#49](https://github.com/JaysonRawlins/ecphory/pull/49))
+
 ## [0.3.7](https://github.com/JaysonRawlins/ecphory/compare/v0.3.6...v0.3.7) - 2026-09-17
 
 ### Added
