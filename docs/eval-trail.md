@@ -20,6 +20,7 @@ episode disagrees with the last row here, this file wins.
 | 2026-07-16 | v0.3.5-dev | 834 | 275 | 87.6% | 98.5% | 0.924 | 4 | 1.32ms | ecphory `019f6dd1` |
 | 2026-09-17 | v0.3.8 +#53 +#56 | 1302 | 275 | 88.0% | 97.8% | 0.923 | 6 | 2.95ms | ecphory `01a0b29d-a202` |
 | 2026-09-18 | v0.3.8 +#53 +#56 | 1317 | 275 | 88.0% | 97.8% | 0.923 | 6 | 2.05ms | this file |
+| 2026-09-19 | v0.3.8 +#57 +#58 | 1332 | 275 | 88.0% | 97.5% | 0.923 | 7 | 3.64ms | this file |
 
 The first two rows are undated because the habit of recording *when* a reading
 was taken started at the day-5 checkpoint — which is most of the reason this
@@ -47,6 +48,9 @@ months and ~480 added episodes. Drift is on the order of 0.001. So:
   `019f5906`) have been missing since 2026-07-16; `30e10a15` and `0024dcac`
   joined since. A miss id you have not seen before is worth a look. A count
   that ticked up while the ids stayed in this set is not.
+  The 2026-09-19 reading is 7 misses with no new identity: `019f5906` resolved
+  to two distinct episodes (`-b8f6`, `-9404`) instead of one. Same cluster,
+  one more member of it — crowding, by the rule directly above.
 - **A drop past the floor below, or a miss set that changes wholesale, is a
   real signal** — most likely the wrong binary is live or the index has drifted.
 
@@ -99,6 +103,7 @@ gold reading:
 | --- | --- | --- | --- |
 | 2026-07-17 | 2 | 2 | 0 |
 | 2026-09-18 | 48 | 47 | 1 |
+| 2026-09-19 | 48 | 47 | 1 |
 
 **Do not treat a non-zero exit here as a deploy gate.** A heal can regress
 because a *better* sibling was written later, which is the store working, not
