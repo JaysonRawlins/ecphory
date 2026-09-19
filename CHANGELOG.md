@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9](https://github.com/JaysonRawlins/ecphory/compare/v0.3.8...v0.3.9) - 2026-09-19
+
+### Fixed
+
+- *(git)* stop a developer's global git config from failing the suite ([#56](https://github.com/JaysonRawlins/ecphory/pull/56))
+
+### Other
+
+- *(skills)* merge deploy into deploy-daemon, and guard the contradiction ([#60](https://github.com/JaysonRawlins/ecphory/pull/60))
+- *(release)* audit that every release tag has a Release behind it ([#59](https://github.com/JaysonRawlins/ecphory/pull/59))
+- *(readme)* stop pinning a version in Status, and guard it ([#58](https://github.com/JaysonRawlins/ecphory/pull/58))
+- *(deploy-daemon)* replace the frozen eval baseline with an appended trail ([#57](https://github.com/JaysonRawlins/ecphory/pull/57))
+- *(openspec)* archive daemon-auth-boundary ([#54](https://github.com/JaysonRawlins/ecphory/pull/54))
+
 ## [0.3.8](https://github.com/JaysonRawlins/ecphory/compare/606af91...v0.3.8) - 2026-09-18
 
 ### Fixed
