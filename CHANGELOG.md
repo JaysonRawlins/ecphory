@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.8](https://github.com/JaysonRawlins/ecphory/compare/v0.3.7...v0.3.8) - 2026-09-18
+## [0.3.8](https://github.com/JaysonRawlins/ecphory/compare/606af91...v0.3.8) - 2026-09-18
 
 ### Fixed
 
@@ -18,7 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(readme)* wire an agent to the daemon, and correct the stale facts ([#52](https://github.com/JaysonRawlins/ecphory/pull/52))
 - *(openspec)* archive provenance-conventions ([#49](https://github.com/JaysonRawlins/ecphory/pull/49))
 
-## [0.3.7](https://github.com/JaysonRawlins/ecphory/compare/v0.3.6...v0.3.7) - 2026-09-17
+## [0.3.7](https://github.com/JaysonRawlins/ecphory/compare/v0.3.6...606af91) - 2026-09-17
+
+**Never released.** The `v0.3.7` tag was pushed, but the release build stopped
+on a transient error before it created the GitHub Release, so this version has
+no artifacts and no installer. The tag was deleted on 2026-09-19; everything
+below shipped in 0.3.8. The compare links either side of this entry name commit
+`606af91` rather than the tag for that reason.
 
 ### Added
 

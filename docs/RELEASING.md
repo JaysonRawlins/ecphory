@@ -27,7 +27,56 @@ everything. Two tools split the work:
 1. Land conventional commits on `main` (`feat:` → minor, `fix:` → patch,
    `feat!:`/`BREAKING CHANGE` → major while >1.0; pre-1.0 majors bump minor).
 2. Review the open **release PR** (version + changelog) and merge it.
-3. release-plz tags; dist builds and publishes the GitHub Release. Done.
+3. release-plz tags; dist builds and publishes the GitHub Release.
+4. Confirm the Release actually exists — `gh release list`, not
+   `git ls-remote --tags`. The tag and the Release come from two different
+   systems and the second one can fail on its own; see *Did the Release
+   actually happen?* below.
+
+## Did the Release actually happen?
+
+A tag is not a release. release-plz pushes the tag; dist builds the artifacts
+and creates the Release in a separate workflow that can fail after the tag is
+already public. When it does, the version looks shipped and cannot be
+installed.
+
+`docs/audit-tag-releases.sh` compares every stable `vX.Y.Z` tag against the
+published Releases and exits non-zero on a gap. `--ignore TAG` exempts one.
+`.github/workflows/release-audit.yml` runs it weekly and on demand:
+
+```
+gh workflow run release-audit.yml   # or just run the script locally
+```
+
+**Why it exists: v0.3.7.** Tagged 2026-09-17, never released. In run
+[35296550696](https://github.com/JaysonRawlins/ecphory/actions/runs/35296550696)
+the `build-local-artifacts (x86_64-apple-darwin)` leg died in *Upload
+artifacts* with `Failed to CreateArtifact: Unable to make request: ENOTFOUND`
+— a transient network error, not a build failure. The other four legs
+succeeded, and `host`, `build-global-artifacts` and `announce` all skipped, so
+no Release was ever created. The tag sat orphaned for two days and nothing
+reported it.
+
+Note what the gap does **not** look like: `/releases/tag/v0.3.7` returned
+`200`, because GitHub renders a plain tag page for a tag with no Release behind
+it. Only the asset URLs 404. Eyeballing the tag page is not a check, which is
+why the audit reads the API.
+
+**If the audit reports a gap**, pick one:
+
+- **Re-cut it** — delete and re-push the tag so `release.yml` fires again.
+  Worth it only if that commit is still worth installing on its own. Check its
+  `dist-workspace.toml` first: re-running an old tag rebuilds it with *that*
+  commit's config, not today's.
+- **Delete it** — `git push origin :refs/tags/vX.Y.Z`. Repoint any `CHANGELOG.md`
+  compare link naming the tag at its commit SHA first; a GitHub compare against
+  a ref that no longer exists returns 404.
+
+v0.3.7 was deleted on 2026-09-19, for both reasons: 0.3.8 shipped its contents
+a day later, and re-running dist against `606af91` would have produced
+`.tar.xz` artifacts — `unix-archive` only arrived in 0.3.8, so the re-cut
+release would have carried the exact debian/ubuntu install bug described under
+*Install smoke test*.
 
 ## Secrets (names only — values live in GitHub repo secrets)
 

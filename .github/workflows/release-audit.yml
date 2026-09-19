@@ -1,0 +1,37 @@
+name: release-audit
+
+# Does every release tag still have a GitHub Release behind it?
+#
+# v0.3.7 did not, for two days, and nothing said so: release-plz pushed the tag,
+# one dist matrix leg died on a transient upload-artifact error, dist's host and
+# announce jobs skipped, and no Release was created. The workflow run that
+# failed scrolled out of view; the tag looked fine forever after.
+#
+# Scheduled rather than release-triggered on purpose. The failure being caught
+# is dist's announce job never running, so anything downstream of announce is
+# downstream of the failure and cannot see it. `on: release` is not an option
+# either -- dist creates the Release with the workflow token, and events from
+# that token do not trigger further workflows.
+#
+# Caveat worth knowing: GitHub disables scheduled workflows in a repository
+# after 60 days with no commits, so a dormant repo stops auditing itself.
+# Run docs/audit-tag-releases.sh by hand, or dispatch this, after any release.
+
+on:
+  schedule:
+    - cron: '0 11 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tags-have-releases:
+    name: tags have releases
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit tags against releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./docs/audit-tag-releases.sh --repo "$GITHUB_REPOSITORY"
