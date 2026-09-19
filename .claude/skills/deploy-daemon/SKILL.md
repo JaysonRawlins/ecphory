@@ -1,8 +1,8 @@
 ---
 name: deploy-daemon
-description: Deploy the local ecphory daemon from source and verify it BEHAVIORALLY. Use whenever a change should go live on the running daemon (after a merge, "restart the daemon", "put this live", "bounce ecphory"), or when diagnosing whether the running daemon actually contains a change. The core rule — version strings lie, behavioral probes don't — exists because a fresh install once reported the right-looking version while running fix-less code.
+description: Deploy a locally built ecphory binary to the live launchd daemon on macOS and verify it BEHAVIORALLY. Use whenever a change needs to reach the running service — after a merge or cargo build, when the user says "deploy", "redeploy", "ship it to the daemon", "put this live", "bounce ecphory", "restart ecphory with the new build" — or when diagnosing whether the running daemon actually contains a change. Encodes the AMFI fresh-inode + re-sign sequence, the launchd gotchas that SIGKILL a naive cp deploy, and the core rule: version strings lie, behavioral probes don't.
 metadata:
-  version: 1.1.0
+  version: 2.0.0
 disable-model-invocation: false
 ---
 
@@ -10,6 +10,11 @@ disable-model-invocation: false
 
 The daemon is a LaunchAgent (`com.ecphory.server`) running `~/.local/bin/ecphory serve`
 on port 3491, db at `~/.local/share/ecphory/ecphory.redb`.
+
+macOS AMFI caches code-signing verdicts per-inode and launchd is the strictest
+enforcement tier: a plain `cp` over the old binary gets SIGKILLed (exit 137)
+even when shell execution still works, and after a crash-looped load even shell
+exec dies. Every step below exists because skipping it has already failed once.
 
 ## Steps
 
@@ -19,13 +24,39 @@ on port 3491, db at `~/.local/share/ecphory/ecphory.redb`.
    the local checkout was on a pre-fix feature branch, and the resulting binary
    *reported* a plausible version. Release TAGS can also predate a fix —
    release-plz cuts the release PR from where main was when it opened.
-2. **Build + test:** `cargo test --quiet && cargo build --release`
-3. **Install with a fresh inode** (never overwrite in place — macOS vnode
-   signature cache SIGKILLs on the next spawn for signed binaries; rm-then-cp
-   is the safe habit regardless):
-   `rm ~/.local/bin/ecphory && cp target/release/ecphory ~/.local/bin/ecphory`
-4. **Restart:** `launchctl kickstart -k gui/$(id -u)/com.ecphory.server`
-   then confirm a NEW pid: `ps aux | grep "ecphory serve" | grep -v grep`
+2. **Build + verify quality gates:**
+   ```
+   cargo test -q && cargo clippy --all-targets -q && cargo build --release
+   ```
+3. **Fresh-inode install (never cp-over-in-place):**
+   ```
+   rm ~/.local/bin/ecphory
+   cp target/release/ecphory ~/.local/bin/ecphory
+   xattr -c ~/.local/bin/ecphory
+   codesign --force --sign - ~/.local/bin/ecphory
+   ```
+   The `rm` is what gets a new inode, so AMFI re-evaluates instead of serving a
+   cached verdict for the old one. `xattr -c` drops quarantine and any stale
+   signing xattrs; the ad-hoc re-sign then gives the new inode a verdict launchd
+   will accept.
+4. **Restart the daemon,** then confirm a NEW pid:
+   ```
+   launchctl kickstart -k gui/$(id -u)/com.ecphory.server
+   ps aux | grep "ecphory serve" | grep -v grep
+   ```
+   Run this yourself — it is not gated away from the agent. Placet's only
+   hardcoded launchctl deny is scoped to `(bootout|unload|remove)` against
+   Placet's *own* LaunchAgent, which a kickstart on `com.ecphory.server` cannot
+   match. An earlier copy of this runbook claimed otherwise and cost a
+   round-trip through a human on every deploy;
+   `tests/deploy_skill_singular.rs` now fails if that claim comes back.
+
+   Then check the client path before trusting the restart:
+   ```
+   curl -s http://127.0.0.1:3491/health
+   curl -s http://127.0.0.1:3491/api/v1/status
+   claude mcp list | grep Ecphory   # expect ✔ Connected
+   ```
 5. **Verify behaviorally — this is the load-bearing step:**
    - `ecphory --version` (necessary, not sufficient)
    - **The floor gate (machine).** Exits non-zero below the floor:
@@ -55,15 +86,28 @@ on port 3491, db at `~/.local/share/ecphory/ecphory.redb`.
      rate a rank-1 search as miss with its own id in intended_episode_ids and
      expect `already_ranks` with phrases unchanged.
 
-## Gotchas
+## Gotchas (each one has bitten)
 
-- The `ecphory` CLI can't read the db while the daemon holds the lock
+- **Plist env changes need a full reload, not kickstart**: `kickstart -k`
+  reuses the loaded job definition. After editing the plist:
+  `bootout` → pause → `bootstrap` (separate single-line commands). Verify
+  what the process actually got with `ps eww <pid>`.
+- **KeepAlive respawn tests lie after crash loops**: launchd applies
+  escalating backoff per label; a `pkill` test that shows no respawn is the
+  penalty box, not a config bug. `kickstart` (no `-k`) forces a spawn.
+- **The real log is `serve.err`** — tracing writes to stderr; `serve.log`
+  (stdout) stays empty.
+- **`codesign --verify` passing proves nothing** about the launchd tier.
+- **The `ecphory` CLI can't read the db while the daemon holds the lock**
   ("Database already open") — use the HTTP API (`/api/v1/memory/...`) for
   anything against the live store.
-- MCP clients connected before the restart don't see newly added tools until
-  they reconnect.
-- Restarting drops every active session's memory connection for a moment —
-  fine, they reconnect; just don't bounce mid-write.
-- The gold set is NOT in this repo. It lives at
+- **Restarts are cheap for clients**: streamable HTTP MCP is stateless
+  per-request, so sessions reconnect on their own (unlike engram's stdio
+  proxy). It does drop every active memory connection for a moment — fine,
+  just don't bounce mid-write. MCP clients connected before the restart won't
+  see newly added *tools* until they reconnect.
+- **The gold set is NOT in this repo.** It lives at
   `~/.local/share/ecphory/gold.jsonl` in a single unversioned copy — see
   "Known gaps" in [`docs/eval-trail.md`](../../../docs/eval-trail.md).
+- Full history: ecphory episodes `f7b2c73d` (runbook) and `1dc68bc4`
+  (launchd lessons).
