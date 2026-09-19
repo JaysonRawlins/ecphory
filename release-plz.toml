@@ -1,8 +1,10 @@
 [workspace]
-# No crates.io publish while the repo is private — the .crate file would
-# expose the source ahead of the public flip. Versions therefore come from
-# git tags, not the registry. At flip time: set publish = true, remove
-# git_only, and do the first `cargo publish` with a registry token.
+# ecphory is not on crates.io, so versions come from git tags rather than the
+# registry. That started as a privacy measure — a published .crate would have
+# exposed the source while the repo was private — but the repo went public on
+# 2026-09-16 and this stayed off, so turning it on is now a decision and not
+# something the privacy is blocking. To start publishing: set publish = true,
+# remove git_only, and do the first `cargo publish` with a registry token.
 publish = false
 git_only = true
 # dist's release.yml owns the GitHub Release: it triggers on the tag

@@ -431,23 +431,28 @@ vulnerability privately.
 
 ## Status
 
-v0.3.7. Canonical store, tantivy BM25 search with write-time phrase boosting,
-flight recorder, MCP daemon (stdio + streamable HTTP), REST mirror, eval
-harness (gold-set, used-signal, and `--from-log` against the real workload),
-git mirror export/import. Since v0.3.3 the recorder closes the loop: explicit
-search ratings drive the self-correction cycle described above, validated
-heals are kept as permanent regression tests (`eval --heals`), and
-tape entries carry an `origin` tag so eval and backfill sweeps stay out of the
-organic workload statistics. Two-phase deletion (agent demote, operator purge)
-landed in v0.3.4. v0.3.7 added the subject index, made provenance
-correctable after the fact, and converged the search index on a document
-count instead of a wildcard probe that read every index as empty — which
-took `ecphory search` on a 900-episode store from 390 ms to 54 ms
-([#37](https://github.com/JaysonRawlins/ecphory/pull/37)). See
-[CHANGELOG.md](CHANGELOG.md).
-
-Running in production as the author's daily-driver agent memory since
+Pre-1.0, and in production as the author's daily-driver agent memory since
 2026-07-12.
+
+Canonical store, tantivy BM25 search with write-time phrase boosting, flight
+recorder, MCP daemon (stdio + streamable HTTP), REST mirror, eval harness
+(gold-set, used-signal, and `--from-log` against the real workload), git
+mirror export/import. The recorder closes the loop: explicit search ratings
+drive the self-correction cycle described above, validated heals are kept as
+permanent regression tests (`eval --heals`), and tape entries carry an
+`origin` tag so eval and backfill sweeps stay out of the organic workload
+statistics. Deletion is two-phase, agent demote then operator purge. There is
+a subject index, and provenance is correctable after the fact. Search
+converges the index on a document count rather than a wildcard probe that read
+every index as empty, which took `ecphory search` on a 900-episode store from
+390 ms to 54 ms
+([#37](https://github.com/JaysonRawlins/ecphory/pull/37)).
+
+What shipped when is in [CHANGELOG.md](CHANGELOG.md) and on the
+[releases page](https://github.com/JaysonRawlins/ecphory/releases), both of
+which are right by construction. This section names no version on purpose: one
+pinned here went stale three times in two days, and
+`tests/readme_version_pin.rs` fails if it comes back.
 
 ## Lineage
 
