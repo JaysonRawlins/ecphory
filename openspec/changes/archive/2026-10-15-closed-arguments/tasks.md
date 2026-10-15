@@ -55,6 +55,10 @@
       after); the hook's and the recall/loops servers' request shapes all 200;
       `claude mcp list` Connected. Eval floor passed; rows in
       `docs/eval-trail.md`.
-- [ ] 3.5 A restarted Claude Code session calls `update_episode` with
-      `mode: "append"` through its own MCP client. Runs after merge; recorded
-      in ecphory.
+- [x] 3.5 Claude Code, against the deployed daemon. This session's client,
+      still holding the pre-deploy schema, sent the incident's exact call
+      (`mode: "append"`) and it appended; `merge: true` came back "unknown
+      field `merge`, expected one of ...". A fresh headless `claude -p`
+      session loaded `update_episode` with `mode` and its description, so the
+      closed schema does not trip Claude Code's validator. Scratch episode
+      demoted.
