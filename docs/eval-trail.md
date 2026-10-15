@@ -21,6 +21,7 @@ episode disagrees with the last row here, this file wins.
 | 2026-09-17 | v0.3.8 +#53 +#56 | 1302 | 275 | 88.0% | 97.8% | 0.923 | 6 | 2.95ms | ecphory `01a0b29d-a202` |
 | 2026-09-18 | v0.3.8 +#53 +#56 | 1317 | 275 | 88.0% | 97.8% | 0.923 | 6 | 2.05ms | this file |
 | 2026-09-19 | v0.3.8 +#57 +#58 | 1332 | 275 | 88.0% | 97.5% | 0.923 | 7 | 3.64ms | this file |
+| 2026-10-15 | v0.3.8 +#61 | 4715 | 275 | 87.6% | 98.2% | 0.923 | 5 | 3.02ms | this file |
 
 The first two rows are undated because the habit of recording *when* a reading
 was taken started at the day-5 checkpoint — which is most of the reason this
@@ -51,6 +52,13 @@ months and ~480 added episodes. Drift is on the order of 0.001. So:
   The 2026-09-19 reading is 7 misses with no new identity: `019f5906` resolved
   to two distinct episodes (`-b8f6`, `-9404`) instead of one. Same cluster,
   one more member of it — crowding, by the rule directly above.
+  The 2026-10-15 reading is 5: `30e10a15` and `0024dcac` rank again, and the
+  rest of the set is unchanged. `Episodes` jumped to 4715 because the status
+  count includes demoted episodes (2051 of them) and the hidden `flashcards`
+  group. Of the ~3390 added since 2026-09-19, ~1930 are a `flashcards-test`
+  batch since demoted and ~1160 are `flashcards`; `default` grew by ~260.
+  Demoted and hidden episodes are skipped by an unscoped search, so they do
+  not crowd the gold set; this column overstates the pressure from here on.
 - **A drop past the floor below, or a miss set that changes wholesale, is a
   real signal** — most likely the wrong binary is live or the index has drifted.
 
@@ -104,6 +112,7 @@ gold reading:
 | 2026-07-17 | 2 | 2 | 0 |
 | 2026-09-18 | 48 | 47 | 1 |
 | 2026-09-19 | 48 | 47 | 1 |
+| 2026-10-15 | 53 | 51 | 2 |
 
 **Do not treat a non-zero exit here as a deploy gate.** A heal can regress
 because a *better* sibling was written later, which is the store working, not
@@ -111,6 +120,12 @@ failing. The 2026-09-18 regression is exactly that: the heal targeting
 `01a0a278` now ranks nowhere in the top 8 for its query, because `bb835474` was
 written since and scores 57.62 against it. Compare against the recorded row
 instead: *more* regressions than the last reading is the signal.
+
+The 2026-10-15 reading has one more, and it is the same shape. The heal on
+`01a05935` validated at rank 1 on 2026-09-11; its query is now topped by six
+episodes all written after that (2026-09-17 to 2026-10-08). The deploy that
+took the reading (#61) changed argument parsing, not ranking. One query looked
+at, no rollback run.
 
 ## Adding a row
 

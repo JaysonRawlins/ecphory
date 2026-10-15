@@ -48,6 +48,13 @@
       `ecphory_recall.sh` hook, `render-session-context.sh`, the `recall` and
       `loops` servers send only defined fields. `resume-tailor` passed engram's
       `search_mode`/`search_alpha` and was corrected in claude-config.
-- [ ] 3.4 Post-deploy: the production daemon refuses an unknown field and
-      appends on `mode: "append"`, and a restarted Claude Code session still
-      loads the tools. Recorded in ecphory, not here, since it runs after merge.
+- [x] 3.4 Post-deploy, production daemon (new pid after kickstart). Red first:
+      before the deploy `search?search_mode=hybrid` returned 200. After: 400
+      naming the field; MCP `merge: true` refused naming it; the incident's
+      exact `mode: "append"` call kept the original (scratch episode, demoted
+      after); the hook's and the recall/loops servers' request shapes all 200;
+      `claude mcp list` Connected. Eval floor passed; rows in
+      `docs/eval-trail.md`.
+- [ ] 3.5 A restarted Claude Code session calls `update_episode` with
+      `mode: "append"` through its own MCP client. Runs after merge; recorded
+      in ecphory.
