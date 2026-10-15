@@ -5,7 +5,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::model::{Episode, EpisodeVersion, UpdateParams};
+use crate::model::{ContentMode, Episode, EpisodeVersion, UpdateParams};
 
 /// Canonical store. redb is the source of truth; every derived structure
 /// (the tantivy index, later) must be rebuildable from these tables alone.
@@ -184,12 +184,22 @@ impl Store {
     /// Update an episode, archiving its prior state first. Refuses an
     /// ambiguous prefix before touching anything.
     pub fn update(&self, id_or_prefix: &str, params: UpdateParams) -> Result<Episode> {
+        if params.content_mode == ContentMode::Append && params.content.is_none() {
+            return Err(Error::InvalidUpdate(
+                "mode \"append\" needs content to append".into(),
+            ));
+        }
         self.mutate(id_or_prefix, "update", |ep| {
             if let Some(name) = params.name.clone() {
                 ep.name = Some(name);
             }
             if let Some(content) = params.content.clone() {
-                ep.content = content;
+                ep.content = match params.content_mode {
+                    ContentMode::Append if !ep.content.is_empty() => {
+                        format!("{}\n\n{content}", ep.content)
+                    }
+                    _ => content,
+                };
             }
             if let Some(phrases) = params.search_phrases.clone() {
                 ep.search_phrases = phrases;
@@ -674,6 +684,7 @@ mod tests {
                     source_description: Some("revised description".into()),
                     expired_at: Some(expires),
                     metadata: Some(serde_json::json!({"state": "revised"})),
+                    content_mode: ContentMode::Replace,
                 },
             )
             .unwrap();
