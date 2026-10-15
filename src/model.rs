@@ -81,6 +81,30 @@ pub struct UpdateParams {
     pub source_description: Option<String>,
     pub expired_at: Option<DateTime<Utc>>,
     pub metadata: Option<serde_json::Value>,
+    /// How `content` meets what is stored. Append exists because the routine
+    /// edit is stamping an outcome onto a long episode, and the only other
+    /// way to do that is for an agent to retype the whole thing.
+    #[serde(default)]
+    pub content_mode: ContentMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentMode {
+    #[default]
+    Replace,
+    Append,
+}
+
+impl std::str::FromStr for ContentMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "" | "replace" => Ok(ContentMode::Replace),
+            "append" => Ok(ContentMode::Append),
+            other => Err(format!("invalid mode {other:?} (expected replace|append)")),
+        }
+    }
 }
 
 /// Archived prior state of an episode, captured before update or demote so

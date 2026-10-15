@@ -7,7 +7,7 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::model::{Episode, UpdateParams};
+use crate::model::{ContentMode, Episode, UpdateParams};
 use crate::service::{Ecphory, SearchOptions};
 use crate::store::ListOptions;
 
@@ -41,8 +41,15 @@ fn to_json<T: serde::Serialize>(v: &T) -> Result<String, ErrorData> {
 // `"type": ["string","null"]` union arrays, which Claude Code's schema
 // validator rejects — tools silently vanish ("tools fetch failed").
 // Empty string / empty vec / zero / Null mean "not provided".
+//
+// Every request struct denies unknown fields. serde's default is to drop
+// them, and a dropped field is a silent change of meaning: an agent's guessed
+// `mode: "append"` vanished and its update replaced a 5,500-word episode
+// while reporting success (ecphory 01a14120). Refusing makes the guess fail
+// loudly, and it renders as `additionalProperties: false` in the schema.
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddMemoryRequest {
     /// The memory content, stored verbatim (never rewritten server-side).
     pub content: String,
@@ -78,6 +85,7 @@ pub struct AddMemoryRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchRequest {
     /// Query text (BM25 over content, names, and search phrases).
     pub query: String,
@@ -105,12 +113,14 @@ pub struct SearchRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IdRequest {
     /// Full episode UUID or a unique prefix (8+ chars is usually enough).
     pub id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RestoreVersionRequest {
     /// Full episode UUID or a unique prefix.
     pub id: String,
@@ -119,6 +129,7 @@ pub struct RestoreVersionRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetEpisodeRequest {
     /// Full episode UUID or a unique prefix (8+ chars is usually enough).
     pub id: String,
@@ -130,6 +141,7 @@ pub struct GetEpisodeRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RateSearchRequest {
     /// The search_id returned by a previous search call.
     pub search_id: String,
@@ -155,6 +167,7 @@ pub struct RateSearchRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetEpisodesRequest {
     /// Maximum results, newest first (default 10).
     #[serde(default)]
@@ -164,12 +177,19 @@ pub struct GetEpisodesRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateEpisodeRequest {
     /// Full episode UUID or a unique prefix.
     pub id: String,
-    /// New content; empty means leave unchanged.
+    /// New content; empty means leave unchanged. How it meets the stored
+    /// content is `mode`.
     #[serde(default)]
     pub content: String,
+    /// "replace" (the default) or "append". Append adds `content` after the
+    /// stored content, separated by a blank line, so stamping an outcome onto
+    /// a long episode never means resending the whole of it.
+    #[serde(default)]
+    pub mode: String,
     /// New name; empty means leave unchanged.
     #[serde(default)]
     pub name: String,
@@ -196,6 +216,7 @@ pub struct UpdateEpisodeRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteEpisodeRequest {
     /// Full episode UUID or a unique prefix.
     pub id: String,
@@ -353,17 +374,22 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update an episode's fields, provenance (source, source_model, source_description) included, so a value written wrong stays correctable. The prior state is archived and recoverable."
+        description = "Update an episode's fields, provenance (source, source_model, source_description) included, so a value written wrong stays correctable. content REPLACES the stored content unless mode is \"append\". Unknown arguments are refused. The prior state is archived and recoverable."
     )]
     fn update_episode(
         &self,
         Parameters(req): Parameters<UpdateEpisodeRequest>,
     ) -> Result<String, ErrorData> {
+        let content_mode: ContentMode = req
+            .mode
+            .parse()
+            .map_err(|e: String| ErrorData::invalid_params(e, None))?;
         let mut svc = self.svc.lock().map_err(internal)?;
         let ep = svc
             .update(
                 &req.id,
                 UpdateParams {
+                    content_mode,
                     content: opt_str(req.content),
                     name: opt_str(req.name),
                     search_phrases: opt_vec(req.search_phrases),
@@ -511,15 +537,48 @@ pub fn serve_stdio(svc: Ecphory) -> anyhow::Result<()> {
     })
 }
 
+/// The MCP transport as an axum router, ready for `build_router` to mount.
+/// Shared by `serve_http` and the tests, so a test drives the transport
+/// production serves rather than a copy of it.
+pub(crate) fn mcp_router(shared: Arc<Mutex<Ecphory>>) -> axum::Router<crate::http::Shared> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    // Plain JSON request/response (MCP streamable HTTP, 2025-06-18):
+    // no SSE framing, no priming events, no per-session server state.
+    // Simple tools need none of it, and Claude Code's health check
+    // stalled on the stateful mode's SSE priming events.
+    let mut config = StreamableHttpServerConfig::default();
+    config.stateful_mode = false;
+    config.json_response = true;
+    let service = StreamableHttpService::new(
+        move || Ok(McpServer::new(shared.clone())),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    // Claude Code omits the spec-required Accept header on tools/list
+    // (anthropics/claude-code#30426), which strict streamable-HTTP
+    // servers 406 — the failure is silent client-side ("tools fetch
+    // failed"). Be liberal: inject the header on every inbound request.
+    axum::Router::new()
+        .fallback_service(service)
+        .layer(axum::middleware::map_request(
+            |mut req: axum::http::Request<axum::body::Body>| async {
+                req.headers_mut().insert(
+                    axum::http::header::ACCEPT,
+                    axum::http::HeaderValue::from_static("application/json, text/event-stream"),
+                );
+                req
+            },
+        ))
+}
+
 /// Serve MCP over streamable HTTP + the REST mirror: one daemon owns the
 /// store lock, any number of client sessions connect concurrently. This is
 /// the fix for the M4 gate finding (stdio-per-session collides on redb's
 /// exclusive lock).
 pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
-    use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-    };
-
     let shared = Arc::new(Mutex::new(svc));
     let token = std::env::var("ECPHORY_AUTH_TOKEN")
         .ok()
@@ -599,43 +658,201 @@ pub fn serve_http(svc: Ecphory, port: u16) -> anyhow::Result<()> {
             }
         }
 
-        // Plain JSON request/response (MCP streamable HTTP, 2025-06-18):
-        // no SSE framing, no priming events, no per-session server state.
-        // Simple tools need none of it, and Claude Code's health check
-        // stalled on the stateful mode's SSE priming events.
-        let mut config = StreamableHttpServerConfig::default();
-        config.stateful_mode = false;
-        config.json_response = true;
-        let service = StreamableHttpService::new(
-            move || Ok(McpServer::new(shared.clone())),
-            Arc::new(LocalSessionManager::default()),
-            config,
-        );
-        // Claude Code omits the spec-required Accept header on tools/list
-        // (anthropics/claude-code#30426), which strict streamable-HTTP
-        // servers 406 — the failure is silent client-side ("tools fetch
-        // failed"). Be liberal: inject the header on every inbound request.
-        let mcp = axum::Router::new().fallback_service(service).layer(
-            axum::middleware::map_request(
-                |mut req: axum::http::Request<axum::body::Body>| async {
-                    req.headers_mut().insert(
-                        axum::http::header::ACCEPT,
-                        axum::http::HeaderValue::from_static(
-                            "application/json, text/event-stream",
-                        ),
-                    );
-                    req
-                },
-            ),
-        );
         // Handed to `build_router` rather than nested onto its result: that
         // is what puts /mcp inside the bearer gate instead of beside it
         // (#47). Do not go back to `.nest_service` on the finished router.
-        let router = crate::http::build_router(state, Some(mcp));
+        let router = crate::http::build_router(state, Some(mcp_router(shared)));
         // Loopback only: single-user local daemon, no remote surface.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         tracing::info!("ecphory MCP listening on http://127.0.0.1:{port}/mcp");
         axum::serve(listener, router).await?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    // Driven over the real streamable-HTTP transport (`mcp_router`, mounted by
+    // `build_router`), because the defect lives in how rmcp deserializes tool
+    // arguments; a direct call to the handler would skip the layer under test.
+    async fn spawn() -> (String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = Ecphory::open_with(dir.path().join("mcp.redb"), true).expect("open");
+        let shared = Arc::new(Mutex::new(svc));
+        let state = Arc::new(crate::http::AppState {
+            svc: shared.clone(),
+            token: None,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                crate::http::build_router(state, Some(mcp_router(shared))),
+            )
+            .await
+            .unwrap();
+        });
+        (format!("http://{addr}/mcp"), dir)
+    }
+
+    fn rpc(url: &str, method: &str, params: Value) -> Value {
+        ureq::post(url)
+            .send_json(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+            .unwrap_or_else(|e| panic!("{method}: {e}"))
+            .body_mut()
+            .read_json()
+            .unwrap()
+    }
+
+    /// The tool's JSON payload on success, or `Err` with the refusal text —
+    /// whether rmcp reports it as a JSON-RPC error or as an `isError` result.
+    fn call(url: &str, tool: &str, arguments: Value) -> Result<Value, String> {
+        let resp = rpc(
+            url,
+            "tools/call",
+            json!({"name": tool, "arguments": arguments}),
+        );
+        if let Some(err) = resp.get("error") {
+            return Err(err.to_string());
+        }
+        let result = &resp["result"];
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        if result["isError"] == json!(true) {
+            return Err(text.to_string());
+        }
+        Ok(serde_json::from_str(text).unwrap_or_else(|_| json!(text)))
+    }
+
+    fn add(url: &str, content: &str) -> String {
+        let out = call(url, "add_memory", json!({"content": content})).unwrap();
+        out["id"].as_str().unwrap().to_string()
+    }
+
+    fn content_of(url: &str, id: &str) -> String {
+        let ep = call(url, "get_episode", json!({"id": id, "no_record": true})).unwrap();
+        ep["content"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unknown_argument_is_refused_not_dropped() {
+        let (url, _dir) = spawn().await;
+        let id = add(&url, "the long original body");
+
+        // A field the tool does not have. Dropped silently, this call was a
+        // full replace that reported success.
+        let out = call(
+            &url,
+            "update_episode",
+            json!({"id": id, "content": "stamp", "merge": true}),
+        );
+        let err = out.expect_err("an unknown argument must be refused");
+        assert!(
+            err.contains("merge"),
+            "the refusal must name the field: {err}"
+        );
+        assert_eq!(content_of(&url, &id), "the long original body");
+
+        // Same rule on a read: a stale engram parameter is refused rather than
+        // quietly giving a different search than the caller asked for.
+        let out = call(
+            &url,
+            "search",
+            json!({"query": "original", "search_mode": "hybrid"}),
+        );
+        assert!(out.is_err(), "search must refuse an unknown argument too");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn append_mode_keeps_the_original_and_archives_it() {
+        let (url, _dir) = spawn().await;
+        let id = add(&url, "the long original body");
+
+        // The exact call from the incident (ecphory 01a14120).
+        call(
+            &url,
+            "update_episode",
+            json!({"id": id, "content": "OUTCOMES: shipped", "mode": "append"}),
+        )
+        .unwrap();
+        assert_eq!(
+            content_of(&url, &id),
+            "the long original body\n\nOUTCOMES: shipped"
+        );
+
+        let versions = call(&url, "get_episode_versions", json!({"id": id})).unwrap();
+        assert_eq!(
+            versions["count"],
+            json!(1),
+            "one append, one archived state"
+        );
+        assert_eq!(
+            versions["versions"][0]["episode"]["content"],
+            json!("the long original body")
+        );
+
+        // Replace is still the default, and still spelled out when asked for.
+        call(
+            &url,
+            "update_episode",
+            json!({"id": id, "content": "rewritten", "mode": "replace"}),
+        )
+        .unwrap();
+        assert_eq!(content_of(&url, &id), "rewritten");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mode_that_cannot_mean_anything_is_refused() {
+        let (url, _dir) = spawn().await;
+        let id = add(&url, "body");
+
+        let out = call(
+            &url,
+            "update_episode",
+            json!({"id": id, "content": "x", "mode": "merge"}),
+        );
+        assert!(out.is_err(), "an unrecognised mode must be refused");
+
+        // Append with nothing to append is a caller mistake, not a no-op.
+        let out = call(
+            &url,
+            "update_episode",
+            json!({"id": id, "name": "renamed", "mode": "append"}),
+        );
+        assert!(out.is_err(), "append without content must be refused");
+        assert_eq!(content_of(&url, &id), "body");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tool_schemas_close_their_argument_lists() {
+        let (url, _dir) = spawn().await;
+        let tools = rpc(&url, "tools/list", json!({}));
+        let tools = tools["result"]["tools"].as_array().unwrap();
+        for tool in tools {
+            let schema = &tool["inputSchema"];
+            if schema["properties"]
+                .as_object()
+                .is_none_or(|p| p.is_empty())
+            {
+                continue;
+            }
+            assert_eq!(
+                schema["additionalProperties"],
+                json!(false),
+                "{} must advertise a closed argument list",
+                tool["name"]
+            );
+        }
+        let update = tools
+            .iter()
+            .find(|t| t["name"] == json!("update_episode"))
+            .unwrap();
+        assert!(
+            update["inputSchema"]["properties"]["mode"].is_object(),
+            "update_episode must advertise mode"
+        );
+    }
 }

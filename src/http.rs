@@ -21,7 +21,7 @@ pub struct AppState {
     pub token: Option<String>,
 }
 
-type Shared = Arc<AppState>;
+pub(crate) type Shared = Arc<AppState>;
 
 /// `mcp` is the MCP transport, passed in rather than bolted on by the caller.
 /// It used to be nested onto the *finished* router by `serve_http`, which put
@@ -125,12 +125,14 @@ fn map_err(e: crate::error::Error) -> Response {
         }
         Error::AmbiguousPrefix(_)
         | Error::AmbiguousVersionPrefix { .. }
-        | Error::HardDeleteRefused => err(StatusCode::BAD_REQUEST, e.to_string()),
+        | Error::HardDeleteRefused
+        | Error::InvalidUpdate(_) => err(StatusCode::BAD_REQUEST, e.to_string()),
         _ => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddMemoryBody {
     content: String,
     #[serde(default)]
@@ -189,6 +191,7 @@ fn none_if_empty(s: String) -> Option<String> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchQuery {
     query: String,
     #[serde(default)]
@@ -272,6 +275,7 @@ async fn search(State(state): State<Shared>, Query(q): Query<SearchQuery>) -> Re
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListQuery {
     #[serde(default)]
     max_results: usize,
@@ -302,6 +306,7 @@ async fn list_episodes(State(state): State<Shared>, Query(q): Query<ListQuery>) 
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetQuery {
     /// Bulk-maintenance bypass: skip the access log (reads that are not
     /// usage signal must not pollute the used-signal join).
@@ -327,9 +332,13 @@ async fn get_episode(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateBody {
     #[serde(default)]
     content: String,
+    /// "replace" (default) | "append".
+    #[serde(default)]
+    mode: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -351,10 +360,15 @@ async fn update_episode(
     Path(id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Response {
+    let content_mode = match body.mode.parse() {
+        Ok(m) => m,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
     let mut svc = state.svc.lock().expect("service lock");
     match svc.update(
         &id,
         UpdateParams {
+            content_mode,
             content: none_if_empty(body.content),
             name: none_if_empty(body.name),
             search_phrases: if body.search_phrases.is_empty() {
@@ -429,6 +443,7 @@ async fn restore_episode_version(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LimitQuery {
     #[serde(default)]
     limit: usize,
@@ -469,6 +484,7 @@ async fn resolution_log(State(state): State<Shared>, Query(q): Query<LimitQuery>
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HealReplayBody {
     /// Top-k window for held/regressed; 0 means the correction default (5).
     #[serde(default)]
@@ -487,6 +503,7 @@ async fn heal_replay(State(state): State<Shared>, Json(body): Json<HealReplayBod
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RateSearchBody {
     search_id: String,
     /// "hit" | "partial" | "miss"
@@ -534,6 +551,7 @@ async fn stats(State(state): State<Shared>) -> Response {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportBody {
     /// Absolute path to a mirror directory (engram or ecphory format).
     dir: String,
@@ -563,6 +581,7 @@ async fn admin_import(State(state): State<Shared>, Json(body): Json<ImportBody>)
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExportBody {
     /// Mirror directory; falls back to ECPHORY_EXPORT_DIR.
     #[serde(default)]
@@ -1214,6 +1233,60 @@ mod tests {
                 .unwrap(),
             mangled,
             "the prior provenance must be archived, not discarded"
+        );
+    }
+
+    // ---- an unknown field is refused, and append appends (01a14120) ----------
+    //
+    // serde drops fields a struct does not name, so a guessed field returned
+    // 200 and did something else: `mode: "append"` replaced a 5,500-word
+    // episode. The MCP surface is pinned in mcp.rs; this is the REST mirror.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rest_refuses_unknown_fields_and_appends_on_request() {
+        fn code<B>(r: Result<ureq::http::Response<B>, ureq::Error>) -> u16 {
+            match r {
+                Ok(resp) => resp.status().as_u16(),
+                Err(ureq::Error::StatusCode(c)) => c,
+                Err(e) => panic!("wanted an HTTP status, got a transport error: {e}"),
+            }
+        }
+        let (base, _dir) = spawn_server().await;
+        let id = add(&base, "the long original body");
+        let path = format!("{base}/api/v1/memory/episodes/{id}");
+
+        let refused = code(ureq::put(&path).send_json(json!({"content": "stamp", "merge": true})));
+        assert!(
+            (400..500).contains(&refused),
+            "an unknown body field must be refused, got {refused}"
+        );
+        let refused = code(
+            ureq::get(format!(
+                "{base}/api/v1/memory/search?query=original&search_mode=hybrid"
+            ))
+            .call(),
+        );
+        assert!(
+            (400..500).contains(&refused),
+            "an unknown query parameter must be refused, got {refused}"
+        );
+        let refused = code(ureq::put(&path).send_json(json!({"content": "x", "mode": "merge"})));
+        assert_eq!(refused, 400, "an unrecognised mode must be refused");
+        let refused = code(ureq::put(&path).send_json(json!({"name": "n", "mode": "append"})));
+        assert_eq!(refused, 400, "append without content must be refused");
+        assert_eq!(
+            get(&base, &format!("/api/v1/memory/episodes/{id}"))["content"],
+            json!("the long original body"),
+            "no refused request may have touched the episode"
+        );
+
+        let ep = put(
+            &base,
+            &format!("/api/v1/memory/episodes/{id}"),
+            json!({"content": "OUTCOMES: shipped", "mode": "append"}),
+        );
+        assert_eq!(
+            ep["content"],
+            json!("the long original body\n\nOUTCOMES: shipped")
         );
     }
 

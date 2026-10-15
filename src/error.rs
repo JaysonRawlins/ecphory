@@ -31,6 +31,9 @@ pub enum Error {
     )]
     NotDemoted(String),
 
+    #[error("invalid update: {0}")]
+    InvalidUpdate(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 

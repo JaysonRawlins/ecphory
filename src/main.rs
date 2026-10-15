@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::model::{Episode, UpdateParams};
+use crate::model::{ContentMode, Episode, UpdateParams};
 use crate::recorder::{AccessLogEntry, RatingLogEntry, ResolutionLogEntry, SearchLogEntry};
 use crate::service::{Ecphory, PurgeManifest, SearchOptions};
 use crate::store::ListOptions;
@@ -91,6 +91,9 @@ enum Command {
         id: String,
         #[arg(long)]
         content: Option<String>,
+        /// Add --content after the stored content instead of replacing it
+        #[arg(long, requires = "content")]
+        append: bool,
         #[arg(long)]
         name: Option<String>,
         #[arg(long = "phrase")]
@@ -604,6 +607,7 @@ fn main() -> anyhow::Result<()> {
         Command::Update {
             id,
             content,
+            append,
             name,
             phrases,
             tags,
@@ -613,6 +617,11 @@ fn main() -> anyhow::Result<()> {
         } => {
             let params = UpdateParams {
                 content,
+                content_mode: if append {
+                    ContentMode::Append
+                } else {
+                    ContentMode::Replace
+                },
                 name,
                 search_phrases: if phrases.is_empty() {
                     None
