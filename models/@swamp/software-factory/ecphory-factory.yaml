@@ -607,7 +607,12 @@ globalArguments:
           which validates the change, merges its deltas into openspec/specs/ and
           moves the folder to openspec/changes/archive/<date>-<changeSlug>/.
           Never pass --skip-specs or --no-validate, and do not edit the merged
-          specs by hand. `openspec archive` can refuse where `openspec validate
+          specs by hand, with one exception: a new capability's spec gets a
+          placeholder Purpose ("TBD - created by archiving ..."), which passes
+          --strict; replace the placeholder Purpose with what the capability is
+          for, drawn from proposal.md's Why and at least 50 characters, because
+          --strict refuses a shorter one. openspec-archive-verify refuses the
+          placeholder. `openspec archive` can refuse where `openspec validate
           --strict` passed: it aborts, changing nothing, when a MODIFIED block
           drops a scenario the current spec has, which renaming a scenario does.
           Restore the scenario's name in the delta and archive again. Run

@@ -22,6 +22,11 @@ dirty="$(git status --porcelain -- openspec/)"
 [ -z "$dirty" ] || fail "uncommitted changes under openspec/: $(tr '\n' ' ' <<<"$dirty")"
 [ -n "$(git ls-files -- "${archived[0]}")" ] || fail "${archived[0]} is not tracked by git"
 
+# `openspec archive` writes this placeholder into a new capability's spec, and
+# it is long enough to pass --strict.
+placeholder="$(grep -rl '^TBD - created by archiving' openspec/specs/ || true)"
+[ -z "$placeholder" ] || fail "replace the placeholder Purpose in: $(tr '\n' ' ' <<<"$placeholder")"
+
 if ! report="$(openspec validate --specs --strict 2>&1)"; then
   fail "merged specs fail openspec validate --specs --strict: $report"
 fi

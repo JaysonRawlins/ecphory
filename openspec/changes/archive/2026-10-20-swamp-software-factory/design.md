@@ -51,6 +51,7 @@ leak the wrapper exists to stop, and a CLAUDE.md telling agents to run bare
   `swamp` call that bypasses the wrapper does not. `PATH_add scripts` routes
   bare `swamp` to the wrapper in shells that loaded direnv. An agent shell
   launched without direnv still finds the real swamp first.
-- The definition was written by hand and checked offline with the extension's
-  own schema and graph validator (version 2026.09.24.2). Running swamp's real
-  `validate` needs the personal key.
+- swamp's `validate` checks the schema and that every stage is reachable,
+  nothing more. The stage graph and prompt rules are only as safe as
+  `tests/factory_definition.rs`, and no factory run has yet driven a real work
+  item through the definition end to end.

@@ -322,6 +322,7 @@ mod archive {
     fn archive_runs_openspec_archive_and_a_workflow_checks_it() {
         assert!(prompt("archive").contains(&format!("openspec archive {PLAN_SLUG} --yes")));
         assert!(prompt("archive").contains("drops a scenario the current spec has"));
+        assert!(prompt("archive").contains("replace the placeholder Purpose"));
         assert_eq!(
             stage("archive")["evidence"][0]["schema"]["required"],
             json!(["changeSlug", "archivedPath", "headSha"])

@@ -15,6 +15,12 @@
 //! are layered: without them the gate still refuses, on a later check, so the
 //! failure comes from the stderr assertion naming which check fired. That
 //! assertion is what keeps each check's own test meaningful.
+//!
+//! The placeholder-Purpose check was added after archiving this repo's own
+//! factory change: `openspec archive` wrote `TBD - created by archiving ...`,
+//! which passes `--strict`. Without the check `archive_gate_fails_on_a_
+//! placeholder_purpose` saw rc=0. A fixture Purpose under 50 characters fails
+//! `--strict` ("Purpose section is too brief"), hence the long one.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -155,14 +161,36 @@ fn archive_gate_fails_on_an_uncommitted_archive() {
     assert_gate(&out, false, "archive not committed", "uncommitted");
 }
 
+impl Fixture {
+    /// `openspec archive` gives a new capability `Purpose: TBD - created by
+    /// archiving...`; the archive stage replaces it, as every spec here has.
+    fn fill_purpose(&self) {
+        let spec = self.root().join("openspec/specs/demo-cap/spec.md");
+        let body = fs::read_to_string(&spec).unwrap();
+        let tbd = body.lines().find(|l| l.starts_with("TBD - created by archiving")).expect("TBD purpose").to_string();
+        fs::write(spec, body.replace(&tbd, "A demo capability, here only so the factory gate tests have a spec to merge.")).unwrap();
+    }
+}
+
 #[test]
 fn archive_gate_passes_on_a_committed_archive() {
     let fx = Fixture::new();
     fx.tick_all();
     fx.openspec(&["archive", "demo", "--yes"]);
+    fx.fill_purpose();
     fx.commit("archive demo");
     let out = fx.gate("check-change-archived.sh", &["demo"]);
     assert_gate(&out, true, "committed archive", "");
+}
+
+#[test]
+fn archive_gate_fails_on_a_placeholder_purpose() {
+    let fx = Fixture::new();
+    fx.tick_all();
+    fx.openspec(&["archive", "demo", "--yes"]);
+    fx.commit("archive demo, purpose left as TBD");
+    let out = fx.gate("check-change-archived.sh", &["demo"]);
+    assert_gate(&out, false, "TBD purpose", "Purpose");
 }
 
 #[test]
@@ -170,6 +198,7 @@ fn archive_gate_fails_when_the_merged_specs_are_not_strictly_valid() {
     let fx = Fixture::new();
     fx.tick_all();
     fx.openspec(&["archive", "demo", "--yes"]);
+    fx.fill_purpose();
     // A requirement with no SHALL/MUST fails `openspec validate --specs --strict`.
     let spec = fx.root().join("openspec/specs/demo-cap/spec.md");
     let body = fs::read_to_string(&spec).unwrap().replace("SHALL do", "does");
