@@ -38,12 +38,19 @@ drops `SWAMP_API_KEY_FILE` and `SWAMP_SIGNIN_TOKEN` and refuses
 loads `.envrc` once through `direnv exec`. All of this comes from swamp's source
 (`api_key_source.ts`, `paths.ts`, `auth_repository.ts`).
 
+**swamp enrolls no AI tool (`tools: []`).** With `tools: [claude]`, swamp writes
+a Claude Code hook that runs bare `swamp` after every Bash call, which is the
+leak the wrapper exists to stop, and a CLAUDE.md telling agents to run bare
+`swamp`. Its skills are loaded from user-level and vendored copies instead.
+
 ## Risks
 
 - swamp's extension helper reads credentials from `XDG_CONFIG_HOME` or `HOME`,
   ignoring `SWAMP_CONFIG_DIR`, and falls back to that auth.json when
   `SWAMP_API_KEY` is empty. The wrapper's non-empty-key rule covers it. A bare
-  `swamp` call that bypasses the wrapper does not.
+  `swamp` call that bypasses the wrapper does not. `PATH_add scripts` routes
+  bare `swamp` to the wrapper in shells that loaded direnv. An agent shell
+  launched without direnv still finds the real swamp first.
 - The definition was written by hand and checked offline with the extension's
   own schema and graph validator (version 2026.09.24.2). Running swamp's real
   `validate` needs the personal key.

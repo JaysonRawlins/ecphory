@@ -37,12 +37,23 @@
 
 ## 4. With the personal swamp key
 
-- [ ] 4.1 `scripts/swamp auth whoami` shows the personal account, and the hashes
-      of `~/.config/swamp/auth.json` and `auth_verified.json` are the same
-      before and after every step below.
-- [ ] 4.2 `scripts/swamp repo init`, `extension pull @swamp/software-factory`,
-      then `model method run ecphory-factory validate`, which must fail on a
-      mutated gate first.
+- [x] 4.1 With the work login in the default dir, bare `swamp` answered as
+      the work account (collectives include the employer's) and
+      `scripts/swamp` from an agent shell as the personal one. The work
+      login's auth.json and auth_verified.json hashed the same before and
+      after. With the hop suppressed and no identity, the wrapper refused
+      (rc=78) without reaching swamp.
+- [x] 4.2 `repo init`, `extension pull @swamp/software-factory` (2026.10.13.1),
+      then real `validate`: rc=1 on a gate renamed to `gateId` ("Unrecognized
+      key"), rc=0 on the definition. `typeVersion` corrected to the type's own
+      2026.06.24.1. `workflow validate` passes all four and fails a step
+      depending on a missing step.
+- [x] 4.2a `repo init` with `tools: [claude]` wrote `.claude/settings.local.json`
+      with a hook running bare `swamp audit record` after every Bash call.
+      Agent shells never load direnv, so it ran 5 times as the default dir's
+      (work) login before it was removed. Now `tools: []`, pinned, with
+      telemetry off, and no swamp CLAUDE.md. `PATH_add scripts` in `.envrc`
+      sends a bare `swamp` in any direnv shell to the wrapper.
 - [ ] 4.3 `workflow validate` for all four workflows. Run each live, red then
       green: plan-verify on a broken and a valid change; tasks-verify with a
       task unticked and ticked; archive-verify before and after the archive

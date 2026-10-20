@@ -25,6 +25,17 @@
 //!   the fake direnv capped itself, this one hung instead of failing.
 //! - an `export SWAMP_API_KEY="<literal>"` line appended to `.envrc`: the
 //!   committed-envrc test.
+//! - the wrapper's self-skip removed: `the_wrapper_on_path_as_swamp_...`
+//!   timed out at 10s, exec'ing itself.
+//! - `.swamp.yaml` back to `tools: [claude]`: `swamp_is_enrolled_for_no_ai_tool`.
+//!   Live, in throwaway dirs: `swamp repo upgrade` with `tools: [claude]`
+//!   wrote `.claude/settings.local.json` and CLAUDE.md; with `tools: []`,
+//!   neither.
+//!
+//! Live, 2026-10-19, with the work login in the default dir: bare `swamp`
+//! answered as the work account, `scripts/swamp` from an agent shell (no
+//! direnv env) as the personal one, and the work login's auth.json and
+//! auth_verified.json hashed the same before and after.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -175,6 +186,7 @@ fn the_committed_envrc_reads_the_key_from_doppler_and_nowhere_else() {
 
     let envrc = fs::read_to_string(root.join(".envrc")).expect("read .envrc");
     assert!(envrc.contains("export SWAMP_CONFIG_DIR=\"$HOME/.config/swamp-personal\""));
+    assert!(envrc.lines().any(|l| l == "PATH_add scripts"), "bare `swamp` must resolve to the wrapper");
     let assignments: Vec<&str> = envrc
         .lines()
         .map(str::trim_start)
@@ -188,6 +200,56 @@ fn the_committed_envrc_reads_the_key_from_doppler_and_nowhere_else() {
             "SWAMP_API_KEY must come from Doppler, not: {line}"
         );
     }
+}
+
+/// `.envrc` puts `scripts/` on PATH so a bare `swamp`, as the vendored
+/// software-factory skill writes it, reaches the wrapper. The wrapper must then
+/// find the real swamp behind itself rather than exec itself forever.
+#[test]
+fn the_wrapper_on_path_as_swamp_reaches_the_real_swamp() {
+    let sb = Sandbox::new();
+    let front = sb.home.join("front");
+    fs::create_dir_all(&front).unwrap();
+    std::os::unix::fs::symlink(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/swamp"), front.join("swamp"))
+        .unwrap();
+    let dir = sb.personal_dir();
+    let mut child = Command::new(front.join("swamp"))
+        .args(["auth", "whoami"])
+        .env_clear()
+        .env("HOME", &sb.home)
+        .env("PATH", format!("{}:{}:/usr/bin:/bin", front.display(), sb.bin.display()))
+        .env("SWAMP_CONFIG_DIR", &dir)
+        .env("SWAMP_API_KEY", KEY)
+        .spawn()
+        .expect("run swamp via PATH");
+    // A wrapper that re-finds itself never exits; fail instead of hanging.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            panic!("wrapper on PATH did not exit in 10s: it is exec'ing itself");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success());
+    assert!(sb.reached().expect("real swamp not reached").starts_with("args=auth whoami\n"));
+}
+
+/// With `tools: [claude]`, `swamp repo init`/`upgrade` writes
+/// `.claude/settings.local.json` with a hook that runs bare `swamp audit record`
+/// after every Bash call. Agent shells never load direnv, so that bare call ran
+/// as the default dir's login: five times on 2026-10-19 before it was removed.
+/// `tools: []` makes swamp write no Claude settings and no CLAUDE.md.
+#[test]
+fn swamp_is_enrolled_for_no_ai_tool() {
+    let marker = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".swamp.yaml"))
+        .expect("read .swamp.yaml");
+    let lines: Vec<&str> = marker.lines().collect();
+    assert!(lines.contains(&"tools: []"), ".swamp.yaml must enroll no AI tool:\n{marker}");
+    assert!(lines.contains(&"telemetryDisabled: true"), ".swamp.yaml must keep telemetry off:\n{marker}");
 }
 
 #[test]

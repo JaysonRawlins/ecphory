@@ -18,6 +18,11 @@ credential ahead of the personal key.
 - **THEN** the wrapper refuses, so swamp never writes the personal identity into
   the other account's auth.json
 
+#### Scenario: swamp writes no agent hook
+- **WHEN** `swamp repo init` or `swamp repo upgrade` runs in this repo
+- **THEN** it writes no `.claude/settings.local.json`, because `.swamp.yaml`
+  enrolls no AI tool
+
 ### Requirement: The factory refutes and approves a plan before implementation
 The factory SHALL verify the OpenSpec change strictly, then have one reviewer
 who did not write it record findings, at most twice per run. A human SHALL
