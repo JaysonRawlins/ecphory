@@ -1,0 +1,168 @@
+id: 93d9fe63-7ceb-436e-ba49-7c78e0e5af77
+name: pre-pr-verify
+description: >-
+  Pre-PR verification: the checks CI runs, run before the factory opens a PR
+  rather than after. The suite with its totals (scripts/factory/cargo-test-counts.sh),
+  clippy with warnings denied, and strict validation of the current-state
+  specs, all against a clean checkout of exactly the commit named.
+tags: {}
+# Required explicitly: swamp no longer provides a default verification report,
+# and a workflow that names a removed one exits 0 and stores an error report in
+# its place. open-pr embeds this report in the PR body.
+reports:
+  require:
+    - "@swamp/verification-summary"
+inputs:
+  type: object
+  required: [commit]
+  properties:
+    commit:
+      type: string
+      description: >-
+        The commit being verified. The head step fails unless it is HEAD, and
+        @swamp/verification-summary reads it as subject.commit.
+    branch:
+      type: string
+      description: Read by @swamp/verification-summary as subject.branch.
+jobs:
+  - name: verify
+    description: Tests, clippy and specs against a clean checkout of the named commit
+    steps:
+      # Without this a run attests whatever the working tree holds: an
+      # uncommitted fix passes here and is missing from the commit the PR ships.
+      - name: head
+        description: HEAD must be the named commit, with nothing uncommitted or untracked
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell-head
+          methodName: execute
+          inputs:
+            run: >-
+              h=$(git rev-parse HEAD);
+              [ "$h" = "${{ inputs.commit }}" ] || { echo "HEAD is $h, not ${{ inputs.commit }}" >&2; exit 1; };
+              d=$(git status --porcelain);
+              [ -z "$d" ] || { echo "working tree not clean: $d" >&2; exit 1; };
+              echo "verifying $h, tree clean"
+            # the paired assert is the gate, so the output survives (swamp-club#2536)
+            ignoreExitCode: true
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: assert-head
+        description: the head check must exit 0
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell-head" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: >-
+            HEAD is not the commit being verified, or the tree has uncommitted
+            or untracked files -- see the ecphory-shell-head result data
+          severity: high
+        dependsOn:
+          - step: head
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: test
+        description: cargo test --all-targets, failing on zero tests; prints the totals
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell-test
+          methodName: execute
+          inputs:
+            run: bash scripts/factory/cargo-test-counts.sh
+            timeout: 1800000
+            ignoreExitCode: true
+        dependsOn:
+          - step: assert-head
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: assert-test
+        description: the suite must have run with nothing failing
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell-test" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: >-
+            cargo test failed, did not compile, or ran no tests -- see the
+            ecphory-shell-test result data; its last line is the totals
+          severity: high
+        dependsOn:
+          - step: test
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: clippy
+        description: cargo clippy --all-targets -- -D warnings (as CI runs it)
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell-clippy
+          methodName: execute
+          inputs:
+            run: cargo clippy --all-targets -- -D warnings
+            timeout: 1800000
+            ignoreExitCode: true
+        dependsOn:
+          - step: assert-test
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: assert-clippy
+        description: clippy must exit 0
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell-clippy" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: clippy reported warnings or errors -- see the ecphory-shell-clippy result data
+          severity: high
+        dependsOn:
+          - step: clippy
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: specs
+        description: openspec validate --specs --strict (the current-state specs)
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell-specs
+          methodName: execute
+          inputs:
+            run: openspec validate --specs --strict
+            ignoreExitCode: true
+        dependsOn:
+          - step: assert-head
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: assert-specs
+        description: the current-state specs must validate strictly
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell-specs" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: a spec under openspec/specs fails strict validation -- see the ecphory-shell-specs result data
+          severity: high
+        dependsOn:
+          - step: specs
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Run swamp for this repo under the maintainer's own swamp-club identity, or not
+# at all. Use this instead of bare `swamp` here, from agents especially.
+#
+# This machine may also hold another swamp-club account's login in
+# ~/.config/swamp/auth.json, and swamp falls back to it silently whenever
+# SWAMP_API_KEY is unset or empty. Setting only the key is not enough: with the
+# default config dir swamp writes the personal identity into that account's
+# auth.json. So both are required: SWAMP_CONFIG_DIR=~/.config/swamp-personal,
+# and a non-empty SWAMP_API_KEY, which the committed .envrc reads from
+# Doppler. tests/factory_swamp_wrapper.rs pins every refusal below.
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+personal="$HOME/.config/swamp-personal"
+
+refuse() {
+  echo "scripts/swamp: refusing: $1" >&2
+  echo "scripts/swamp: direnv allow (or whitelist this checkout in direnv.toml), with SWAMP_API_KEY in Doppler (project swamp, config personal)" >&2
+  exit 78
+}
+
+if [ "${SWAMP_CONFIG_DIR:-}" != "$personal" ] || [ -z "${SWAMP_API_KEY:-}" ]; then
+  # An agent's shell never runs the direnv hook, so load .envrc once. The
+  # marker stops a .envrc that sets nothing from looping.
+  if [ -z "${ECPHORY_SWAMP_DIRENV_HOP:-}" ] && command -v direnv >/dev/null 2>&1; then
+    export ECPHORY_SWAMP_DIRENV_HOP=1
+    exec direnv exec "$repo" "${BASH_SOURCE[0]}" "$@"
+  fi
+  [ "${SWAMP_CONFIG_DIR:-}" = "$personal" ] || refuse "SWAMP_CONFIG_DIR is not $personal"
+  refuse "SWAMP_API_KEY is unset or empty"
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --club-api-key-file*) refuse "--club-api-key-file outranks SWAMP_API_KEY" ;;
+  esac
+done
+
+# Both outrank or shadow SWAMP_API_KEY in swamp's credential order.
+unset SWAMP_API_KEY_FILE SWAMP_SIGNIN_TOKEN ECPHORY_SWAMP_DIRENV_HOP
+
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+while IFS= read -r candidate; do
+  [ "$candidate" -ef "$self" ] && continue
+  exec "$candidate" "$@"
+done < <(type -ap swamp)
+refuse "no swamp binary on PATH"

@@ -1,0 +1,813 @@
+type: '@swamp/software-factory'
+typeVersion: 2026.06.24.1
+id: 7e25cfe3-86c4-4f6a-a1b8-7ad4dd8b9887
+name: ecphory-factory
+version: 1
+tags: {}
+# Stage graph and prompt rules are pinned by tests/factory_definition.rs.
+# Run swamp through scripts/swamp, never bare `swamp` (see .envrc).
+reports:
+  require:
+    - name: "@swamp/software-factory/work-item-summary"
+      methods: [summary]
+globalArguments:
+  stages:
+    - id: intake
+      initial: true
+      description: >-
+        Read the GitHub issue for this work item (workItem is the bare issue
+        number on JaysonRawlins/ecphory) and record its context.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          Run `gh issue view ${{ self.workItem }} --repo JaysonRawlins/ecphory
+          --json number,title,body,url,labels` and record the issue-context
+          artifact from it, with labels as a list of label names. If the issue
+          is closed or does not exist, stop and tell the operator instead of
+          recording anything.
+      artifacts:
+        - name: issue-context
+          schema:
+            type: object
+            required: [number, title, url]
+            properties:
+              number: { type: integer }
+              title: { type: string, minLength: 1 }
+              body: { type: string }
+              url: { type: string, minLength: 1 }
+              labels: { type: array, items: { type: string } }
+      transitions:
+        - name: submit
+          to: planning
+          gates:
+            - type: artifact-exists
+              config: { artifact: issue-context }
+
+    - id: planning
+      description: >-
+        Turn the issue into a real OpenSpec change (proposal, design, spec
+        deltas, tasks). OpenSpec's task list is the plan, not a freeform
+        artifact.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          Using the recorded issue-context artifact, use the openspec-propose
+          skill to create a complete OpenSpec change (proposal.md, design.md,
+          spec deltas, tasks.md) under openspec/changes/<changeSlug>/. Do not
+          write a freeform plan instead. Read the current specs under
+          openspec/specs/ that the issue touches first, and treat what they say
+          as claims to check against the code, not as facts. Checks that need a
+          running ecphory rather than a test (probing a scratch `ecphory serve`
+          over HTTP, MCP or the CLI) are not tasks: put them in a "## Live
+          verification" section at the end of tasks.md, written as plain
+          bullets without checkboxes, because openspec counts every checkbox in
+          tasks.md as a task and live-verify runs after the task check. Then
+          record the plan artifact with the change's slug and a one-line
+          summary.
+      artifacts:
+        - name: plan
+          schema:
+            type: object
+            required: [changeSlug, summary]
+            properties:
+              changeSlug: { type: string, minLength: 1 }
+              summary: { type: string, minLength: 1 }
+      transitions:
+        - name: submit
+          to: openspec-plan-verify
+          gates:
+            - type: artifact-exists
+              config: { artifact: plan }
+
+    - id: openspec-plan-verify
+      description: >-
+        Verify the OpenSpec change is real and strictly valid before a reviewer
+        refutes it. A change that fails goes back to planning; one that passes
+        goes to plan-refute, where the implementation-approval gate sits.
+      work:
+        mode: workflow
+        workflow:
+          name: openspec-plan-verify
+          inputs:
+            changeSlug: '${{ data.latest(self.name, "artifact-plan").payload.changeSlug }}'
+        resultEvidence: plan-verify-run
+      transitions:
+        - name: pass
+          to: plan-refute
+          gates:
+            - type: workflow-succeeded
+              config: { workflow: openspec-plan-verify }
+        - name: fail
+          to: planning
+          gates:
+            - type: evidence-recorded
+              config: { name: plan-verify-run, requireField: { status: failed } }
+        - name: rework
+          to: planning
+          gates: []
+
+    - id: plan-refute
+      description: >-
+        One reviewer who did not write the OpenSpec change attacks its
+        mechanics against the code before the approver reads it. Its findings
+        are shown at the implementation-approval gate, and the approver decides
+        whether they send the change back through the ungated rework
+        transition. Two refutes per run: a third needs a human's
+        cycle-override, because each fresh reviewer finds a new layer and
+        refuting until one finds nothing measures when the sampling stopped.
+      maxCycles: 2
+      work:
+        mode: dispatch
+        skills: [plan-refute]
+        systemPrompt: >-
+          Read the OpenSpec change at
+          openspec/changes/${{ data.latest(self.name, "artifact-plan").payload.changeSlug }}/
+          (proposal.md, design.md, the spec deltas and tasks.md). If the
+          plan-refute artifact already carries findings from an earlier cycle,
+          fetch them first and check each claimed fix against the change as it
+          stands now: keep each earlier finding's id, re-record any that is not
+          actually fixed at its real severity rather than trusting the change's
+          account of it, and mark the fixed ones resolved. You did not write it
+          and you are not here to approve it: find what will go wrong when it is
+          built. Check design.md against the code it cites under src/: whether
+          each named function does what the change relies on (redb transaction
+          boundaries and the process-exclusive lock, tantivy index convergence,
+          the store id stamp, recorder and rating side effects), whether every
+          surface the behaviour lives on is covered (MCP tools, REST routes, CLI
+          subcommands, and the daemon-first paths the CLI takes while `serve`
+          holds the lock), whether request structs keep deny_unknown_fields, and
+          whether the stated cost is right as the corpus grows. Check that the
+          spec deltas' scenarios cover the failure modes those mechanics have,
+          and that a requirement the change makes false elsewhere in
+          openspec/specs/ is changed too. This review is capped: read only the
+          code the change names and what it calls, and record at most 8
+          findings, each with the file or section it concerns, what is wrong and
+          what the change should say instead, at severity critical, high, medium
+          or low. If nothing is wrong, record what you checked as one low
+          finding.
+      artifacts:
+        - name: plan-refute
+          kind: findings
+          reviews: plan
+      transitions:
+        - name: pass
+          to: implementing
+          gates:
+            - type: artifact-fresh
+              config: { artifact: plan-refute, recordedThisCycle: true }
+            - type: human-approval
+              config: { id: implementation-approval }
+        - name: rework
+          to: planning
+          gates: []
+
+    - id: implementing
+      description: Implement the OpenSpec change's tasks on the work item's branch.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          If openspec/changes/<changeSlug>/ is missing because an earlier cycle
+          archived it (an openspec/changes/archive/<date>-<changeSlug>/ folder
+          exists on this branch), first revert the archive commit before any
+          other edit: the latest openspec-archive evidence names it, and after a
+          rebase `git log main..HEAD -- openspec/changes/archive/` finds it. That
+          restores the change folder and the specs it merged; make delta and
+          task edits in the restored folder, never in openspec/specs/ directly,
+          and the archive stage archives it again. openspec-tasks-verify cannot
+          find an archived change, so skipping the revert fails it.
+
+          Use the openspec-apply-change skill against the change recorded in
+          the plan artifact's changeSlug: work through its tasks.md one task at
+          a time, checking each off (`- [ ]` -> `- [x]`) as you complete it,
+          until every task is done. Work red-first: watch each new test fail
+          against the unfixed code before making it pass. Commit on a feature
+          branch, never on main, with a conventional commit message (feat:,
+          fix:, chore:, docs:) because release-plz cuts releases from them; the
+          commit-msg hook decides the trailers. Leave nothing uncommitted or
+          untracked, since pre-pr-verify refuses a dirty tree. Record the
+          change-summary artifact and the change-request evidence (branch name
+          and head commit sha; no PR yet, that comes after pre-PR verification).
+      artifacts:
+        - name: change-summary
+          schema:
+            type: object
+            required: [summary, headSha]
+            properties:
+              summary: { type: string, minLength: 1 }
+              headSha: { type: string, minLength: 7 }
+      evidence:
+        - name: change-request
+          schema:
+            type: object
+            required: [branch, headSha]
+            properties:
+              branch: { type: string, minLength: 1 }
+              headSha: { type: string, minLength: 7 }
+              url: { type: string }
+      transitions:
+        - name: submit
+          to: openspec-tasks-verify
+          gates:
+            - type: artifact-exists
+              config: { artifact: change-summary }
+            - type: evidence-recorded
+              config: { name: change-request }
+
+    - id: openspec-tasks-verify
+      description: >-
+        Verify every task in the OpenSpec change is checked off before pre-PR
+        verification runs.
+      work:
+        mode: workflow
+        workflow:
+          name: openspec-tasks-verify
+          inputs:
+            changeSlug: '${{ data.latest(self.name, "artifact-plan").payload.changeSlug }}'
+        resultEvidence: tasks-verify-run
+      transitions:
+        - name: pass
+          to: pre-pr-verify
+          gates:
+            - type: workflow-succeeded
+              config: { workflow: openspec-tasks-verify }
+        - name: fail
+          to: implementing
+          gates:
+            - type: evidence-recorded
+              config: { name: tasks-verify-run, requireField: { status: failed } }
+
+    - id: pre-pr-verify
+      description: >-
+        Pre-PR verification: the suite with its totals, clippy with warnings
+        denied, and strict validation of the current specs, against a clean
+        checkout of exactly the change-request commit. Run before the PR opens
+        rather than relying on CI afterwards.
+      work:
+        mode: workflow
+        workflow:
+          name: pre-pr-verify
+          inputs:
+            commit: '${{ data.latest(self.name, "evidence-change-request").payload.headSha }}'
+            branch: '${{ data.latest(self.name, "evidence-change-request").payload.branch }}'
+        resultEvidence: verify-run
+      transitions:
+        - name: pass
+          to: adversarial-review
+          gates:
+            - type: workflow-succeeded
+              config: { workflow: pre-pr-verify }
+        - name: fail
+          to: implementing
+          gates:
+            - type: evidence-recorded
+              config: { name: verify-run, requireField: { status: failed } }
+
+    - id: adversarial-review
+      description: >-
+        Adversarial review of the implemented change by subagents that did not
+        write it, after the suite has passed and before live-verify. Passing
+        tests do not show whether the change duplicates behaviour that already
+        exists, whether its boundaries are sound, or whether it is safe and
+        cheap as the store grows. An unresolved finding at critical, high or
+        medium takes rework back to implementing, where the fix re-flows
+        through tasks-verify and pre-pr-verify and is reviewed again: the
+        review artifact reviews change-summary, so a new implementation round
+        invalidates the previous review rather than carrying it forward.
+
+        A finding a reviewer decides not to act on is cleared with
+        resolve_findings and a note saying why, and that note ships in the PR
+        body: resolved is a recorded decision someone can argue with, not a way
+        out of the loop.
+      work:
+        mode: dispatch
+        skills: [architecture, security-performance]
+        systemPrompt: >-
+          Review the change on branch
+          ${{ data.latest(self.name, "evidence-change-request").payload.branch }}
+          at commit
+          ${{ data.latest(self.name, "evidence-change-request").payload.headSha }}
+          (`git diff main...<headSha>` is the change; read the code around the
+          hunks too, not only the hunks). You did not write it and you are not
+          here to approve it: your job is to find what is wrong with it.
+
+          Two lanes run in parallel, one subagent each. The architecture lane
+          owns duplicated behaviour (logic that now exists twice and has to be
+          kept in sync by hand, which in this repo most often means one rule
+          implemented separately in the MCP tool, the REST handler and the CLI
+          instead of once in src/service.rs), spaghetti, things that belong in
+          an existing module (store.rs, index.rs, service.rs, http.rs, mcp.rs;
+          name the one), and SOLID at the seams this change introduces or
+          moves. The security-performance lane owns the auth boundary
+          (build_router owns it; an /mcp or /api/v1 route reachable without the
+          token is critical), request structs missing deny_unknown_fields,
+          unvalidated or unbounded input, secret and PII handling in episode
+          content, logs and the search recorder, and anything whose cost grows
+          with the number of episodes: full scans, per-episode index work,
+          reindexing on open, holding a redb write transaction across slow work.
+
+          Do not re-litigate what already ran. pre-pr-verify ran the suite,
+          clippy with warnings denied and the strict spec validation against
+          this exact commit, so a clippy lint is not a finding. If you find a
+          pattern worth enforcing mechanically, record it as a low finding
+          naming the check you would add.
+
+          Every finding needs a stable lane-prefixed id (ARCH-1, SECPERF-1), the
+          file and symbol it lives in, what specifically is wrong, and what you
+          would do instead. A finding that names no location is not actionable;
+          do not record it. Severity is the routing decision, so spend it
+          honestly: critical for a security hole, data loss or a broken
+          acceptance criterion; high for a design defect that compounds
+          (behaviour duplicated across surfaces, a dependency pointing the wrong
+          way, a cost that grows with the corpus); medium for a refactor worth
+          doing now rather than later; low for advisory. Critical, high and
+          medium send the change back to implementing. Do not inflate a nit to
+          be heard, and do not soften a real defect to let the run proceed.
+
+          If the review artifact already carries findings from an earlier
+          cycle, fetch them first and check each claimed fix against this commit
+          yourself; re-record any that is not actually fixed rather than
+          trusting the resolution note. If you find nothing blocking, still
+          record what you checked as low-severity entries: an empty findings
+          list does not advance the run, because it cannot be told apart from a
+          review that never happened.
+      artifacts:
+        - name: adversarial-review
+          kind: findings
+          reviews: change-summary
+      transitions:
+        - name: pass
+          to: live-verify
+          gates:
+            - type: artifact-fresh
+              config: { artifact: adversarial-review, recordedThisCycle: true }
+            - type: findings-clear
+              config:
+                artifact: adversarial-review
+                blocking: [critical, high, medium]
+            - type: cel
+              config:
+                expr: 'size(artifacts.adversarial_review.findings) >= 1'
+                message: >-
+                  The review recorded no findings at all. Record what was
+                  checked as low-severity entries; an empty report cannot be
+                  told apart from a review that never ran.
+        - name: rework
+          to: implementing
+          gates:
+            # Exactly the complement of 'pass', so one of the two is always
+            # available and the driver never has to choose. Gate expressions
+            # get artifacts, not data.latest(), and an erroring expression
+            # reads exactly like a false one.
+            - type: cel
+              config:
+                expr: >-
+                  size(artifacts.adversarial_review.findings) == 0 ||
+                  artifacts.adversarial_review.findings.exists(f,
+                  (!has(f.resolved) || !f.resolved) &&
+                  (f.severity == "critical" || f.severity == "high" ||
+                  f.severity == "medium"))
+                message: >-
+                  No blocking finding is open, so there is nothing to rework;
+                  take 'pass'.
+
+    - id: live-verify
+      description: >-
+        Prove the change does what it claims against a running ecphory built
+        from this commit. pre-pr-verify proves it compiles and its tests pass;
+        nothing before this stage observes the binary behaving. Every
+        acceptance criterion gets live-verification evidence naming a test or
+        an identifier the probe itself produced, or verification-blocked
+        evidence naming what was attempted and what failed. Asserting that
+        testing happened is not accepted.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          List the acceptance criteria of the OpenSpec change recorded in the
+          plan artifact's changeSlug (its specs' scenarios), plus the checks in
+          the "## Live verification" section at the end of its tasks.md.
+          Resolve EVERY one, one entry each, in live-verification evidence.
+
+          Set headSha to the commit you verified against, the same one the
+          change-request evidence names. If the code was amended after
+          verifying, the verification no longer describes the code being
+          shipped and must be redone rather than carried forward.
+
+          Each criterion gets resolution 'static' or 'live'. Use 'static' when a
+          test already proves it, and set evidence to that test as file::test
+          name; this is the common case, and a change whose criteria are all
+          static needs no running instance. Use 'live' only for a criterion no
+          test can prove, and set evidence to an identifier the probe itself
+          produced that someone else can resolve: a search_id, an episode id, a
+          rating id, or the exact HTTP status line and body excerpt. Also fill
+          probe (the exact command), system and observedAt for a live one. Do
+          NOT record a check you did not run, and do NOT paraphrase an
+          identifier: paste it.
+
+          A 'live' criterion runs against a SCRATCH instance, never the live
+          daemon, which is the operator's real memory store serving every agent
+          session. Build this commit (`cargo build --release`), make a temp
+          directory under your own worktree, and start
+          `target/release/ecphory serve --db <tempdir>/scratch.redb --port
+          <a free port>` in the background, with ECPHORY_EXPORT_DIR,
+          ECPHORY_TRIGGERS_FILE and ECPHORY_DB unset so it neither exports to
+          the real mirror nor touches the real store. Point every CLI probe at
+          it with --url or ECPHORY_URL set to that port, and pass --db for
+          offline commands. The port is never 3491 and the store is never
+          ~/.local/share/ecphory: if either appears in a command you are about
+          to run, stop. Seed the scratch store through its own API with
+          whatever the criterion needs. When the checks are done, kill the
+          process, confirm the port no longer answers, and delete the temp
+          directory. Write every temporary file and log this stage produces
+          under your own worktree, never in a shared scratch directory: another
+          run may be writing the same file names there.
+
+          Do NOT tick a live check as a task in the OpenSpec tasks.md. This
+          stage runs AFTER openspec-tasks-verify, which requires every task
+          ticked, so a live task there deadlocks the run. The evidence recorded
+          here IS the record.
+
+          If a criterion genuinely cannot be resolved either way, record
+          verification-blocked for it naming what you attempted and the
+          failure you observed, then ask for the live-verification-waiver
+          approval. "Blocked" owes the same evidence as "passed": if you have
+          not tried a route and seen it fail, you do not yet know it is blocked.
+          Try a second route before recording one. Blocked is for "I tried and
+          could not", never for "there was nothing to try"; that is what
+          'static' is for.
+      evidence:
+        - name: live-verification
+          schema:
+            type: object
+            required: [changeSlug, headSha, criteria]
+            properties:
+              changeSlug: { type: string, minLength: 1 }
+              # The commit this evidence was gathered against. Amending the code
+              # after verifying invalidates it instead of carrying it forward.
+              headSha: { type: string, minLength: 7 }
+              criteria:
+                type: array
+                minItems: 1
+                items:
+                  type: object
+                  required: [criterion, resolution, evidence]
+                  properties:
+                    criterion: { type: string, minLength: 1 }
+                    # 'live' = observed against a scratch instance; 'static' =
+                    # proven by a test. The cost stays proportional to what is
+                    # actually unprovable without a running binary.
+                    resolution: { type: string, enum: [live, static] }
+                    # For 'live', the identifier the probe produced; for
+                    # 'static', file::test name. minLength does the anti-fake
+                    # work: 'true', 'yes' and 'ok' cannot satisfy it.
+                    evidence: { type: string, minLength: 8 }
+                    probe: { type: string }
+                    system: { type: string }
+                    observedAt: { type: string }
+                    result: { type: string }
+        - name: verification-blocked
+          schema:
+            type: object
+            required: [changeSlug, headSha, blocked]
+            properties:
+              changeSlug: { type: string, minLength: 1 }
+              headSha: { type: string, minLength: 7 }
+              blocked:
+                type: array
+                minItems: 1
+                items:
+                  type: object
+                  required: [criterion, attempted, failureObserved, attemptedAt]
+                  properties:
+                    criterion: { type: string, minLength: 1 }
+                    attempted: { type: string, minLength: 1 }
+                    failureObserved: { type: string, minLength: 1 }
+                    attemptedAt: { type: string, minLength: 8 }
+      transitions:
+        - name: pass
+          to: reconcile
+          gates:
+            - type: evidence-recorded
+              config: { name: live-verification }
+        - name: blocked
+          to: reconcile
+          gates:
+            - type: evidence-recorded
+              config: { name: verification-blocked }
+            - type: human-approval
+              config: { id: live-verification-waiver }
+        - name: fail
+          to: implementing
+          gates: []
+
+    - id: reconcile
+      description: >-
+        Reconcile the OpenSpec change with the code before it is archived: a
+        change written at planning drifts from the code through review rework,
+        and nothing else checks that the specs it touches are still true when
+        the PR opens. Runs before the archive so the reasoning in proposal.md
+        and design.md is still beside the deltas it corrects. It edits nothing:
+        a blocking finding takes rework to implementing, where the delta or the
+        code is fixed and re-flows through every check. The artifact reviews
+        change-summary, so a new implementation round invalidates the previous
+        reconcile.
+      work:
+        mode: dispatch
+        skills: [spec-reconcile]
+        systemPrompt: >-
+          Reconcile the OpenSpec change at
+          openspec/changes/${{ data.latest(self.name, "artifact-plan").payload.changeSlug }}/
+          with the code on branch
+          ${{ data.latest(self.name, "evidence-change-request").payload.branch }}
+          at commit
+          ${{ data.latest(self.name, "evidence-change-request").payload.headSha }}
+          (`git diff main...<headSha>` is the change). You did not write it and
+          you are not here to approve it. List every requirement the change's
+          spec deltas add, modify, remove or rename, and every existing
+          requirement under openspec/specs/ whose behaviour the diff touches:
+          search the specs for the files, tools, routes, subcommands and names
+          the diff changes, not only the capabilities the change names. Record
+          one finding per requirement, with an id (REC-1, REC-2…), the
+          capability and requirement name, and either the code that satisfies
+          it (file and symbol) and the test that proves it, or the code that
+          makes it false. A requirement the code makes false, a removed
+          requirement the code still implements, a scenario nothing meets, and
+          a statement in design.md or proposal.md that the code contradicts are
+          blocking: critical when it breaks an acceptance criterion of the
+          issue, high when users or other stages rely on the false statement,
+          medium otherwise. A satisfied requirement is a low finding. Name the
+          fix for each blocking finding: the delta to change, or the code. Do
+          not edit any file; the fix is made in implementing.
+
+          If the reconcile artifact already carries findings from an earlier
+          cycle, fetch them first and check each claimed fix against this
+          commit yourself: keep each earlier finding's id, re-record any that
+          is not actually fixed at its real severity, and mark the fixed ones
+          resolved. An empty findings list does not advance the run.
+      artifacts:
+        - name: reconcile
+          kind: findings
+          reviews: change-summary
+      transitions:
+        - name: pass
+          to: archive
+          gates:
+            - type: artifact-fresh
+              config: { artifact: reconcile, recordedThisCycle: true }
+            - type: findings-clear
+              config:
+                artifact: reconcile
+                blocking: [critical, high, medium]
+            - type: cel
+              config:
+                expr: 'size(artifacts.reconcile.findings) >= 1'
+                message: >-
+                  The reconcile recorded no findings at all. Record each
+                  satisfied requirement as a low-severity entry; an empty
+                  report cannot be told apart from a reconcile that never ran.
+        - name: rework
+          to: implementing
+          gates:
+            # The complement of 'pass', as on adversarial-review.
+            - type: cel
+              config:
+                expr: >-
+                  size(artifacts.reconcile.findings) == 0 ||
+                  artifacts.reconcile.findings.exists(f,
+                  (!has(f.resolved) || !f.resolved) &&
+                  (f.severity == "critical" || f.severity == "high" ||
+                  f.severity == "medium"))
+                message: >-
+                  No blocking finding is open, so there is nothing to rework;
+                  take 'pass'.
+
+    - id: archive
+      description: >-
+        Archive the OpenSpec change in the PR's own branch, so the PR carries
+        the merged current-state specs and no change folder.
+        openspec-archive-verify then checks the tree rather than trusting this
+        stage's account of it.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          Archive the OpenSpec change named by the plan artifact's changeSlug on
+          branch
+          ${{ data.latest(self.name, "evidence-change-request").payload.branch }}.
+          If openspec/changes/<changeSlug>/ is already gone because this stage
+          archived it before and openspec-archive-verify failed, revert that
+          archive commit first (the latest openspec-archive evidence names it)
+          so the change is restored, and read the failed run's ecphory-shell
+          result for what the check reported. Fix only the structure it names,
+          in the restored change folder: a delta header, a missing scenario, a
+          missing SHALL, a file left uncommitted. A requirement that is wrong in
+          what it says is reconcile's to find, not this stage's to fix: stop
+          and ask the operator, who can abort.
+
+          Then, from the repository root, run
+          `openspec archive ${{ data.latest(self.name, "artifact-plan").payload.changeSlug }} --yes`,
+          which validates the change, merges its deltas into openspec/specs/ and
+          moves the folder to openspec/changes/archive/<date>-<changeSlug>/.
+          Never pass --skip-specs or --no-validate, and do not edit the merged
+          specs by hand, with one exception: a new capability's spec gets a
+          placeholder Purpose ("TBD - created by archiving ..."), which passes
+          --strict; replace the placeholder Purpose with what the capability is
+          for, drawn from proposal.md's Why and at least 50 characters, because
+          --strict refuses a shorter one. openspec-archive-verify refuses the
+          placeholder. `openspec archive` can refuse where `openspec validate
+          --strict` passed: it aborts, changing nothing, when a MODIFIED block
+          drops a scenario the current spec has, which renaming a scenario does.
+          Restore the scenario's name in the delta and archive again. Run
+          `openspec validate --specs --strict`. Commit everything the archive
+          changed under openspec/ in one commit on the branch (a `docs(openspec):`
+          conventional commit), and record openspec-archive evidence with the
+          changeSlug, the archived folder as archivedPath, and the archive
+          commit as headSha.
+      evidence:
+        - name: openspec-archive
+          schema:
+            type: object
+            required: [changeSlug, archivedPath, headSha]
+            properties:
+              changeSlug: { type: string, minLength: 1 }
+              archivedPath: { type: string, minLength: 1 }
+              headSha: { type: string, minLength: 7 }
+      transitions:
+        - name: submit
+          to: openspec-archive-verify
+          gates:
+            - type: evidence-recorded
+              config: { name: openspec-archive }
+
+    - id: openspec-archive-verify
+      description: >-
+        Verify the change was archived and the archive committed, and that the
+        merged specs pass `openspec validate --specs --strict`. A failure
+        returns to archive.
+      work:
+        mode: workflow
+        workflow:
+          name: openspec-archive-verify
+          inputs:
+            changeSlug: '${{ data.latest(self.name, "artifact-plan").payload.changeSlug }}'
+        resultEvidence: archive-verify-run
+      transitions:
+        - name: pass
+          to: final-pre-pr-verify
+          gates:
+            - type: workflow-succeeded
+              config: { workflow: openspec-archive-verify }
+        - name: fail
+          to: archive
+          gates:
+            - type: evidence-recorded
+              config: { name: archive-verify-run, requireField: { status: failed } }
+
+    - id: final-pre-pr-verify
+      description: >-
+        Pre-PR verification again, on the archive commit: the archive adds a
+        commit after the first pre-pr-verify, so that run no longer describes
+        the head the PR ships. open-pr builds the PR's test totals and report
+        from this run.
+      work:
+        mode: workflow
+        workflow:
+          name: pre-pr-verify
+          inputs:
+            commit: '${{ data.latest(self.name, "evidence-openspec-archive").payload.headSha }}'
+            branch: '${{ data.latest(self.name, "evidence-change-request").payload.branch }}'
+        resultEvidence: final-verify-run
+      transitions:
+        - name: pass
+          to: open-pr
+          gates:
+            - type: workflow-succeeded
+              config: { workflow: pre-pr-verify }
+        - name: fail
+          to: implementing
+          gates:
+            - type: evidence-recorded
+              config: { name: final-verify-run, requireField: { status: failed } }
+
+    - id: open-pr
+      description: >-
+        Open the pull request now that the archived change has passed pre-PR
+        verification. A defect found before the PR is opened goes back through
+        rework, with a human's approval, rather than through a draft PR.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          Push the branch recorded in change-request evidence, then write the PR
+          body to a file under your own worktree with these sections in order.
+          "## Summary": 2-3 sentences on what changed and why, `Closes #<the
+          intake stage's issue number>`, and an "OpenSpec change" line naming
+          the plan artifact's changeSlug and the archivedPath the
+          openspec-archive evidence records (the change is archived in this
+          branch, so openspec/changes/<changeSlug>/ no longer exists); if
+          planning cycled through more than one changeSlug, list every one.
+          "## Files worth reviewing": the specific files a human should read,
+          with a few words on why each. "## For the reviewer": only what needs
+          a human: adversarial-review and reconcile findings still marked
+          resolved by a note rather than fixed (id, severity, description,
+          resolution note); if the run took the blocked path, the
+          verification-blocked entries and who approved the waiver; deferred
+          items and risks (store format, index rebuilds, MCP tool or REST
+          contract changes). Do NOT list findings that were fixed. Delete the
+          section if nothing needs a human. "## Verified": one line each for the
+          suite, clippy, specs, live check and reviews run. Every query below is
+          for the run recorded in final-verify-run evidence, because the newest
+          row can belong to another run and, without `version >= 0`, swamp
+          searches only the newest version. For the suite line, take the last
+          line of this run's test step output (`scripts/swamp data query
+          'modelName == "ecphory-shell-test" && name == "result" &&
+          workflowRunId == "<the runId recorded in final-verify-run evidence>"
+          && version >= 0' --select attributes.stdout --json`), the
+          `{"tests": N, "failures": N, "ignored": N}` object: the totals are
+          what a reviewer can weigh against the diff, and "it exited 0" is not.
+          Put the live-verification evidence as a table (criterion, resolution,
+          evidence, probe, observedAt) in a `<details><summary>Live
+          verification</summary>` block, and the @swamp/verification-summary
+          report for that run, verbatim, in a `<details><summary>Verification
+          report</summary>` block (find it with `scripts/swamp data query
+          'modelType == "workflow" && modelName == "pre-pr-verify" && name ==
+          "report-swamp-verification-summary" && version >= 0'`, take the one
+          that names this run's head sha, and never embed an error report).
+          The repository is public: redact tokens, local paths, personal data
+          and episode content from everything you write or copy in. End the
+          body with exactly these two trailer lines and nothing after them:
+          `Co-Authored-By: Claude <noreply@anthropic.com>` and `Reviewed-By:
+          Jayson Rawlins <the repo's git config user.email>`. There is no
+          "Generated with Claude Code" footer and no session link. Then run
+          `gh pr create --repo JaysonRawlins/ecphory --base main --head <the
+          branch> --title '<a conventional-commit title>' --body-file <the
+          file>`; the title becomes the squash commit, which release-plz reads.
+          Record the pr-opened evidence with the returned PR url and number.
+      evidence:
+        - name: pr-opened
+          schema:
+            type: object
+            required: [url, number]
+            properties:
+              url: { type: string, minLength: 1 }
+              number: { type: integer }
+      transitions:
+        - name: submit
+          to: in-review
+          gates:
+            - type: evidence-recorded
+              config: { name: pr-opened }
+        - name: rework
+          to: implementing
+          gates:
+            - type: human-approval
+              config: { id: open-pr-rework-approval }
+
+    - id: in-review
+      description: >-
+        The PR is open and a human is reviewing it. Not terminal: opening a PR
+        is not the end of the work, merging is. Review feedback re-enters
+        implementing and re-flows through every check, and the headSha binding
+        on live-verification forces live verification to be redone against the
+        amended commit.
+      work:
+        mode: interactive
+        systemPrompt: >-
+          Wait for review. If the reviewer asks for changes, take the 'rework'
+          transition (it needs a human to approve rework-approval) and address
+          the feedback through the pipeline rather than editing the branch
+          out-of-band. When the reviewer approves the merge, merge with the
+          merge-pr skill (its script squash-merges with a supplied body and
+          owns the trailers), never `gh pr merge` directly. Then record the
+          pr-merged evidence with the merge commit on main and take 'merged'.
+      evidence:
+        - name: pr-merged
+          schema:
+            type: object
+            required: [url, number, mergeCommit]
+            properties:
+              url: { type: string, minLength: 1 }
+              number: { type: integer }
+              mergeCommit: { type: string, minLength: 7 }
+      transitions:
+        - name: rework
+          to: implementing
+          gates:
+            - type: human-approval
+              config: { id: rework-approval }
+        - name: merged
+          to: done
+          gates:
+            - type: evidence-recorded
+              config: { name: pr-merged }
+
+    - id: done
+      terminal: true
+
+    - id: aborted
+      terminal: true
+
+  globalTransitions:
+    - name: abort
+      to: aborted
+      gates:
+        - type: human-approval
+          config: { id: abort-confirmation }
+methods: {}

@@ -1,0 +1,54 @@
+id: efda58f9-e740-4be6-ae88-921995b0f2ac
+name: openspec-plan-verify
+description: >-
+  Fails unless the named OpenSpec change passes `openspec validate --type change
+  --strict`. Gates the factory's planning stage: the plan has to be a real
+  OpenSpec change, not prose in a swamp artifact claiming one exists.
+tags: {}
+inputs:
+  type: object
+  required: [changeSlug]
+  properties:
+    changeSlug:
+      type: string
+      description: The OpenSpec change name (openspec/changes/<changeSlug>/).
+jobs:
+  - name: verify
+    description: Validate the OpenSpec change strictly
+    steps:
+      - name: validate
+        description: openspec validate <changeSlug> --type change --strict
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell
+          methodName: execute
+          inputs:
+            run: 'openspec validate ${{ inputs.changeSlug }} --type change --strict'
+            # The paired assert is the gate, not this method's own throw: a
+            # command/shell step that throws keeps no `result` data, so its
+            # stdout/stderr would be lost (swamp-club#2536).
+            ignoreExitCode: true
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: assert-valid
+        description: openspec validate must exit 0
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: >-
+            the OpenSpec change is not valid -- see the ecphory-shell result
+            data for openspec's own output
+          severity: high
+        dependsOn:
+          - step: validate
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

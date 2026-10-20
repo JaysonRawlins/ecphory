@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 53c3fe5e-f454-4ed1-b3ec-6ea587f434ed
+name: ecphory-shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}
