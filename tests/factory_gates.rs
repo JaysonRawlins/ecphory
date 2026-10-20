@@ -1,4 +1,5 @@
 //! The OpenSpec gates the software factory's workflows run:
+//! `scripts/factory/validate-change.sh` (openspec-plan-verify),
 //! `scripts/factory/check-tasks-complete.sh` (openspec-tasks-verify) and
 //! `scripts/factory/check-change-archived.sh` (openspec-archive-verify).
 //!
@@ -258,4 +259,66 @@ fn archive_gate_fails_when_the_merged_specs_are_not_strictly_valid() {
     fx.commit("archive demo, then break the merged spec");
     let out = fx.gate("check-change-archived.sh", &["demo"]);
     assert_gate(&out, false, "merged spec invalid", "strict");
+}
+
+#[test]
+fn change_gate_passes_a_strictly_valid_change() {
+    let fx = Fixture::new();
+    let out = fx.gate("validate-change.sh", &["demo"]);
+    assert_gate(&out, true, "valid change", "");
+}
+
+#[test]
+fn change_gate_fails_a_change_that_is_not_strictly_valid() {
+    let fx = Fixture::new();
+    let delta = fx
+        .root()
+        .join("openspec/changes/demo/specs/demo-cap/spec.md");
+    let body = fs::read_to_string(&delta)
+        .unwrap()
+        .replace("SHALL do", "does");
+    fs::write(delta, body).unwrap();
+    let out = fx.gate("validate-change.sh", &["demo"]);
+    // RED-PROOF, 2026-10-19: with `openspec validate` replaced by `exit 0`.
+    assert!(
+        !out.status.success(),
+        "a requirement with no SHALL passed --strict"
+    );
+}
+
+/// The slug reaches these scripts from an artifact the agent wrote while
+/// reading someone else's issue, and swamp does not enforce a workflow input's
+/// pattern. So each gate refuses anything but a slug before using it, as a
+/// usage error (2), not a gate failure (1). Here the scripts get the slug as
+/// argv, so nothing parses it as shell; the workflow side of that is
+/// factory_definition's no_value_is_interpolated_into_a_shell_command.
+/// RED-PROOF, 2026-10-19: with the check deleted from each script in turn,
+/// this failed on that script: validate-change "has issues", tasks "not
+/// found", archived "expected one ... found 0", all exit 1.
+#[test]
+fn every_gate_refuses_a_malformed_slug() {
+    let fx = Fixture::new();
+    fx.tick_all();
+    let slug = "demo; touch injected";
+    for script in [
+        "validate-change.sh",
+        "check-tasks-complete.sh",
+        "check-change-archived.sh",
+    ] {
+        for bad in [slug, "-demo", "Demo", "../demo", ""] {
+            let out = fx.gate(script, &[bad]);
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "{script} {bad:?}: stderr {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let out = fx.gate(script, &[slug]);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not a change slug"),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

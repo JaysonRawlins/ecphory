@@ -8,6 +8,8 @@ set -euo pipefail
 
 slug="${1:-}"
 [ -n "$slug" ] || { echo "usage: check-change-archived.sh <change-slug>" >&2; exit 2; }
+# Not from a trusted hand: see validate-change.sh.
+[[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "not a change slug: '$slug'" >&2; exit 2; }
 
 fail() { echo "OpenSpec change \"$slug\": $1" >&2; exit 1; }
 

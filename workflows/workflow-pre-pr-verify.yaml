@@ -37,9 +37,12 @@ jobs:
           modelIdOrName: ecphory-shell-head
           methodName: execute
           inputs:
+            # In env, quoted in the command: the shell never parses the value.
+            env:
+              COMMIT: '${{ inputs.commit }}'
             run: >-
               h=$(git rev-parse HEAD);
-              [ "$h" = "${{ inputs.commit }}" ] || { echo "HEAD is $h, not ${{ inputs.commit }}" >&2; exit 1; };
+              [ "$h" = "$COMMIT" ] || { printf 'HEAD is %s, not %s\n' "$h" "$COMMIT" >&2; exit 1; };
               d=$(git status --porcelain);
               [ -z "$d" ] || { echo "working tree not clean: $d" >&2; exit 1; };
               echo "verifying $h, tree clean"

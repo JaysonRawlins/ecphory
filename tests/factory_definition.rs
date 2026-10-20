@@ -174,6 +174,27 @@ mod intake {
             vec![json!([{"type": "artifact-exists", "config": {"artifact": "issue-context"}}])]
         );
     }
+
+    /// The swamp identity is the session's: a personal session starts under
+    /// `doppler run -p swamp -c personal`, and the employer login is out of
+    /// swamp's default config dir, so any other session is unauthenticated. A
+    /// session that still answers as someone else is stopped here, before the
+    /// issue is read. RED-PROOF, 2026-10-19: absent on a6f8195; dropping the
+    /// username printed `lacks "jaysonjrawlins"`; whoami moved after `gh issue
+    /// view` printed "does not check the swamp identity before reading".
+    #[test]
+    fn intake_checks_the_swamp_identity_before_reading_the_issue() {
+        let text = prompt("intake");
+        let whoami = text.find("swamp auth whoami --json");
+        let issue = text.find("gh issue view");
+        assert!(
+            matches!((whoami, issue), (Some(w), Some(i)) if w < i),
+            "intake does not check the swamp identity before reading the issue:\n{text}"
+        );
+        for want in ["jaysonjrawlins", "stop", "doppler run -p swamp -c personal"] {
+            assert!(text.contains(want), "intake identity check lacks {want:?}");
+        }
+    }
 }
 
 mod plan {
@@ -499,6 +520,49 @@ mod adaptation {
         }
     }
 
+    /// The repo no longer routes swamp through a wrapper; the session carries
+    /// the identity, so every prompt and workflow says plain `swamp`.
+    #[test]
+    fn nothing_routes_swamp_through_a_wrapper() {
+        let mut files = vec![repo().join("models/@swamp/software-factory/ecphory-factory.yaml")];
+        for entry in std::fs::read_dir(repo().join("workflows")).unwrap() {
+            files.push(entry.unwrap().path());
+        }
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !text.contains("scripts/swamp") && !text.contains(".envrc"),
+                "{} still routes swamp through the wrapper",
+                path.display()
+            );
+        }
+        assert!(!repo().join("scripts/swamp").exists());
+        assert!(!repo().join(".envrc").exists());
+    }
+
+    /// With `tools: [claude]`, `swamp repo init`/`upgrade` writes
+    /// `.claude/settings.local.json` with a hook that runs `swamp audit record`
+    /// after every Bash call, under whatever identity that shell has. On
+    /// 2026-10-19 it ran 5 times as the wrong login before it was removed.
+    /// `tools: []` makes swamp write no Claude settings and no CLAUDE.md.
+    /// RED-PROOF: moved here from the deleted factory_swamp_wrapper.rs and
+    /// re-observed 2026-10-19: `.swamp.yaml` back to `tools: [claude]` fails
+    /// it. Live, `swamp repo upgrade` in a throwaway dir wrote both files with
+    /// that and neither without (observed when it was first added).
+    #[test]
+    fn swamp_is_enrolled_for_no_ai_tool() {
+        let marker = std::fs::read_to_string(repo().join(".swamp.yaml")).expect("read .swamp.yaml");
+        let lines: Vec<&str> = marker.lines().collect();
+        assert!(
+            lines.contains(&"tools: []"),
+            ".swamp.yaml must enroll no AI tool:\n{marker}"
+        );
+        assert!(
+            lines.contains(&"telemetryDisabled: true"),
+            ".swamp.yaml must keep telemetry off:\n{marker}"
+        );
+    }
+
     /// swamp's validate checks neither of these: a workflow the factory names,
     /// or a model a workflow step runs, can be missing and the definition still
     /// validates until a run reaches it.
@@ -535,5 +599,58 @@ mod adaptation {
                 }
             }
         }
+    }
+
+    /// No value reaches a shell command by interpolation. Each arrives in the
+    /// step's `env` and the command only ever uses it double-quoted, so the
+    /// shell never parses it. A workflow input's `pattern` is no substitute:
+    /// swamp does not enforce it (measured in placet), and the change slug is
+    /// chosen by an agent reading an issue someone else wrote. Measured here
+    /// too, 2026-10-19: openspec-plan-verify with changeSlug="x; touch <m>" ran
+    /// the touch and reported SUCCEEDED (run 3bc10ea4), because touch's exit 0
+    /// became the step's. RED-PROOF: each of the four workflows restored alone
+    /// from a6f8195 failed with "interpolates into its command"; unquoting
+    /// "$CHANGE_SLUG" in tasks-verify failed with "does not always use it".
+    #[test]
+    fn no_value_is_interpolated_into_a_shell_command() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir(repo().join("workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            let wf: Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap())
+                .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            for job in wf["jobs"].as_array().unwrap() {
+                for step in job["steps"].as_array().unwrap() {
+                    let Some(run) = step["task"]["inputs"]["run"].as_str() else {
+                        continue;
+                    };
+                    checked += 1;
+                    let env = step["task"]["inputs"]["env"]
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    let step = step["name"].as_str().unwrap_or("?");
+                    assert!(
+                        !run.contains("${{"),
+                        "{name} step {step} interpolates into its command: {run}"
+                    );
+                    for (k, v) in env {
+                        if !v.as_str().unwrap_or("").contains("${{") {
+                            continue;
+                        }
+                        let (all, quoted) = (format!("${k}"), format!("\"${k}\""));
+                        assert!(
+                            run.contains(&quoted)
+                                && run.matches(&all).count() == run.matches(&quoted).count(),
+                            "{name} step {step} passes {k} but does not always use it as \"${k}\": {run}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked >= 7,
+            "read {checked} shell steps; this would pass vacuously"
+        );
     }
 }

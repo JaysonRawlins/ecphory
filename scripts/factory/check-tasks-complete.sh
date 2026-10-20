@@ -7,6 +7,8 @@ set -euo pipefail
 
 slug="${1:-}"
 [ -n "$slug" ] || { echo "usage: check-tasks-complete.sh <change-slug>" >&2; exit 2; }
+# Not from a trusted hand: see validate-change.sh.
+[[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "not a change slug: '$slug'" >&2; exit 2; }
 
 list="$(openspec list --json)"
 change="$(jq -c --arg s "$slug" '.changes[] | select(.name == $s)' <<<"$list")"

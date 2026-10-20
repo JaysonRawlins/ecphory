@@ -17,13 +17,16 @@ jobs:
     description: Validate the OpenSpec change strictly
     steps:
       - name: validate
-        description: openspec validate <changeSlug> --type change --strict
+        description: scripts/factory/validate-change.sh <changeSlug>
         task:
           type: model_method
           modelIdOrName: ecphory-shell
           methodName: execute
           inputs:
-            run: 'openspec validate ${{ inputs.changeSlug }} --type change --strict'
+            # In env, quoted in the command: the shell never parses the value.
+            env:
+              CHANGE_SLUG: '${{ inputs.changeSlug }}'
+            run: 'bash scripts/factory/validate-change.sh "$CHANGE_SLUG"'
             # The paired assert is the gate, not this method's own throw: a
             # command/shell step that throws keeps no `result` data, so its
             # stdout/stderr would be lost (swamp-club#2536).
@@ -32,7 +35,7 @@ jobs:
         weight: 0
         allowFailure: false
       - name: assert-valid
-        description: openspec validate must exit 0
+        description: validate-change.sh must exit 0
         task:
           type: assert
           expr: >-

@@ -25,7 +25,10 @@ jobs:
           modelIdOrName: ecphory-shell
           methodName: execute
           inputs:
-            run: 'bash scripts/factory/check-change-archived.sh ${{ inputs.changeSlug }}'
+            # In env, quoted in the command (see plan-verify).
+            env:
+              CHANGE_SLUG: '${{ inputs.changeSlug }}'
+            run: 'bash scripts/factory/check-change-archived.sh "$CHANGE_SLUG"'
             # the paired assert is the gate, so the output survives (see plan-verify)
             ignoreExitCode: true
         dependsOn: []
