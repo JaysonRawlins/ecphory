@@ -600,4 +600,57 @@ mod adaptation {
             }
         }
     }
+
+    /// No value reaches a shell command by interpolation. Each arrives in the
+    /// step's `env` and the command only ever uses it double-quoted, so the
+    /// shell never parses it. A workflow input's `pattern` is no substitute:
+    /// swamp does not enforce it (measured in placet), and the change slug is
+    /// chosen by an agent reading an issue someone else wrote. Measured here
+    /// too, 2026-10-19: openspec-plan-verify with changeSlug="x; touch <m>" ran
+    /// the touch and reported SUCCEEDED (run 3bc10ea4), because touch's exit 0
+    /// became the step's. RED-PROOF: each of the four workflows restored alone
+    /// from a6f8195 failed with "interpolates into its command"; unquoting
+    /// "$CHANGE_SLUG" in tasks-verify failed with "does not always use it".
+    #[test]
+    fn no_value_is_interpolated_into_a_shell_command() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir(repo().join("workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            let wf: Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap())
+                .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            for job in wf["jobs"].as_array().unwrap() {
+                for step in job["steps"].as_array().unwrap() {
+                    let Some(run) = step["task"]["inputs"]["run"].as_str() else {
+                        continue;
+                    };
+                    checked += 1;
+                    let env = step["task"]["inputs"]["env"]
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    let step = step["name"].as_str().unwrap_or("?");
+                    assert!(
+                        !run.contains("${{"),
+                        "{name} step {step} interpolates into its command: {run}"
+                    );
+                    for (k, v) in env {
+                        if !v.as_str().unwrap_or("").contains("${{") {
+                            continue;
+                        }
+                        let (all, quoted) = (format!("${k}"), format!("\"${k}\""));
+                        assert!(
+                            run.contains(&quoted)
+                                && run.matches(&all).count() == run.matches(&quoted).count(),
+                            "{name} step {step} passes {k} but does not always use it as \"${k}\": {run}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked >= 7,
+            "read {checked} shell steps; this would pass vacuously"
+        );
+    }
 }
