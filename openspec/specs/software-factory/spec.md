@@ -4,33 +4,10 @@
 Take a change from GitHub issue to merged PR through gates that check the tree
 rather than the agent's account of it: a plan someone else tried to break, a
 suite that really ran, a live probe that never touches the daemon, and specs
-reconciled and archived before the PR opens. swamp runs it under the
-maintainer's own swamp-club identity or not at all.
-
+reconciled and archived before the PR opens. A run belongs to the maintainer's
+own swamp-club identity, which the session carries, and no workflow value is
+ever parsed by a shell.
 ## Requirements
-### Requirement: swamp runs under the maintainer's own identity or not at all
-`scripts/swamp` SHALL run swamp only when `SWAMP_CONFIG_DIR` is
-`~/.config/swamp-personal` and `SWAMP_API_KEY` is non-empty. It SHALL remove
-`SWAMP_API_KEY_FILE` and `SWAMP_SIGNIN_TOKEN`, and SHALL refuse
-`--club-api-key-file`. Any of these could otherwise put another account's
-credential ahead of the personal key.
-
-#### Scenario: No identity loaded
-- **WHEN** the wrapper runs with neither variable set and direnv loads nothing
-- **THEN** it exits non-zero after at most one direnv hop and swamp is never
-  invoked
-
-#### Scenario: A key with the default config dir
-- **WHEN** `SWAMP_API_KEY` is set but `SWAMP_CONFIG_DIR` is unset or
-  `~/.config/swamp`
-- **THEN** the wrapper refuses, so swamp never writes the personal identity into
-  the other account's auth.json
-
-#### Scenario: swamp writes no agent hook
-- **WHEN** `swamp repo init` or `swamp repo upgrade` runs in this repo
-- **THEN** it writes no `.claude/settings.local.json`, because `.swamp.yaml`
-  enrolls no AI tool
-
 ### Requirement: The factory refutes and approves a plan before implementation
 The factory SHALL verify the OpenSpec change strictly, then have one reviewer
 who did not write it record findings, at most twice per run. A human SHALL
@@ -78,4 +55,38 @@ footer. The run SHALL end when the PR merges through the merge-pr skill.
 #### Scenario: Live verify cannot open a PR
 - **WHEN** live-verify passes
 - **THEN** it leads to reconcile, never to open-pr
+
+### Requirement: A run stops at intake unless swamp is the maintainer's account
+The intake stage SHALL run `swamp auth whoami --json` before reading the issue,
+and SHALL stop and tell the operator to start the session under
+`doppler run -p swamp -c personal` unless it is authenticated as
+`jaysonjrawlins`. `.swamp.yaml` SHALL enroll no AI tool, so swamp writes no
+agent hook that runs swamp under whatever identity a shell has.
+
+#### Scenario: A session started without the personal identity
+- **WHEN** a run's intake stage executes in a session not started under
+  `doppler run -p swamp -c personal`
+- **THEN** `swamp auth whoami` reports no personal login and the stage stops
+  before reading the issue
+
+#### Scenario: swamp writes no agent hook
+- **WHEN** `swamp repo init` or `swamp repo upgrade` runs in this repo
+- **THEN** it writes no `.claude/settings.local.json`, because `.swamp.yaml`
+  enrolls no AI tool
+
+### Requirement: No workflow value is parsed by a shell
+Every value a workflow passes to a shell command SHALL arrive through the
+step's `env` and be used only double-quoted; no `run:` SHALL contain `${{`.
+Each OpenSpec gate script SHALL exit 2 on a change slug that is not
+`[a-z0-9][a-z0-9-]*`.
+
+#### Scenario: An injected change slug
+- **WHEN** openspec-plan-verify, openspec-tasks-verify or
+  openspec-archive-verify runs with `changeSlug="x; touch <marker>"`
+- **THEN** the gate script exits 2 with "not a change slug", the workflow
+  fails, and no marker is created
+
+#### Scenario: An injected commit
+- **WHEN** pre-pr-verify runs with a `commit` that is not HEAD's sha
+- **THEN** the head step fails and the value is never parsed by the shell
 
