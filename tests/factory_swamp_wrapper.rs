@@ -70,11 +70,19 @@ impl Sandbox {
                 record.display()
             ),
         );
-        Sandbox { _dir: dir, home, bin, record }
+        Sandbox {
+            _dir: dir,
+            home,
+            bin,
+            record,
+        }
     }
 
     fn personal_dir(&self) -> String {
-        self.home.join(".config/swamp-personal").display().to_string()
+        self.home
+            .join(".config/swamp-personal")
+            .display()
+            .to_string()
     }
 
     /// Runs the wrapper with a clean environment: PATH is the sandbox bin
@@ -109,7 +117,11 @@ fn assert_refused(sb: &Sandbox, out: &Output, why: &str) {
         "{why}: wrapper exited 0. stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(sb.reached(), None, "{why}: the real swamp was invoked anyway");
+    assert_eq!(
+        sb.reached(),
+        None,
+        "{why}: the real swamp was invoked anyway"
+    );
 }
 
 #[test]
@@ -124,7 +136,10 @@ fn an_empty_key_is_refused() {
     // swamp treats an empty SWAMP_API_KEY as unset and falls back to auth.json.
     let sb = Sandbox::new();
     let dir = sb.personal_dir();
-    let out = sb.run(&[("SWAMP_CONFIG_DIR", &dir), ("SWAMP_API_KEY", "")], &["auth", "whoami"]);
+    let out = sb.run(
+        &[("SWAMP_CONFIG_DIR", &dir), ("SWAMP_API_KEY", "")],
+        &["auth", "whoami"],
+    );
     assert_refused(&sb, &out, "empty SWAMP_API_KEY");
 }
 
@@ -132,7 +147,10 @@ fn an_empty_key_is_refused() {
 fn the_default_config_dir_is_refused_even_with_a_key() {
     let sb = Sandbox::new();
     let work_dir = sb.home.join(".config/swamp").display().to_string();
-    let out = sb.run(&[("SWAMP_CONFIG_DIR", &work_dir), ("SWAMP_API_KEY", KEY)], &["auth", "whoami"]);
+    let out = sb.run(
+        &[("SWAMP_CONFIG_DIR", &work_dir), ("SWAMP_API_KEY", KEY)],
+        &["auth", "whoami"],
+    );
     assert_refused(&sb, &out, "SWAMP_CONFIG_DIR is the other login's dir");
 
     let out = sb.run(&[("SWAMP_API_KEY", KEY)], &["auth", "whoami"]);
@@ -168,8 +186,13 @@ fn direnv_gets_one_hop_and_cannot_loop() {
     );
     let out = sb.run(&[], &["auth", "whoami"]);
     assert_refused(&sb, &out, "direnv loaded nothing");
-    let hop_count = fs::read_to_string(&hops).map(|s| s.lines().count()).unwrap_or(0);
-    assert_eq!(hop_count, 1, "expected exactly one direnv hop, saw {hop_count}");
+    let hop_count = fs::read_to_string(&hops)
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    assert_eq!(
+        hop_count, 1,
+        "expected exactly one direnv hop, saw {hop_count}"
+    );
 }
 
 /// `.envrc` is committed so every worktree loads the identity with no setup,
@@ -182,18 +205,30 @@ fn the_committed_envrc_reads_the_key_from_doppler_and_nowhere_else() {
         .current_dir(&root)
         .output()
         .expect("run git");
-    assert!(tracked.status.success(), ".envrc must be committed so new worktrees get it");
+    assert!(
+        tracked.status.success(),
+        ".envrc must be committed so new worktrees get it"
+    );
 
     let envrc = fs::read_to_string(root.join(".envrc")).expect("read .envrc");
     assert!(envrc.contains("export SWAMP_CONFIG_DIR=\"$HOME/.config/swamp-personal\""));
-    assert!(envrc.lines().any(|l| l == "PATH_add scripts"), "bare `swamp` must resolve to the wrapper");
+    assert!(
+        envrc.lines().any(|l| l == "PATH_add scripts"),
+        "bare `swamp` must resolve to the wrapper"
+    );
     let assignments: Vec<&str> = envrc
         .lines()
         .map(str::trim_start)
         .filter(|l| !l.starts_with('#'))
-        .filter(|l| l.trim_start_matches("export ").starts_with("SWAMP_API_KEY="))
+        .filter(|l| {
+            l.trim_start_matches("export ")
+                .starts_with("SWAMP_API_KEY=")
+        })
         .collect();
-    assert!(!assignments.is_empty(), ".envrc no longer sets SWAMP_API_KEY");
+    assert!(
+        !assignments.is_empty(),
+        ".envrc no longer sets SWAMP_API_KEY"
+    );
     for line in assignments {
         assert!(
             line.starts_with("SWAMP_API_KEY=\"$(doppler secrets get SWAMP_API_KEY "),
@@ -210,14 +245,20 @@ fn the_wrapper_on_path_as_swamp_reaches_the_real_swamp() {
     let sb = Sandbox::new();
     let front = sb.home.join("front");
     fs::create_dir_all(&front).unwrap();
-    std::os::unix::fs::symlink(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/swamp"), front.join("swamp"))
-        .unwrap();
+    std::os::unix::fs::symlink(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/swamp"),
+        front.join("swamp"),
+    )
+    .unwrap();
     let dir = sb.personal_dir();
     let mut child = Command::new(front.join("swamp"))
         .args(["auth", "whoami"])
         .env_clear()
         .env("HOME", &sb.home)
-        .env("PATH", format!("{}:{}:/usr/bin:/bin", front.display(), sb.bin.display()))
+        .env(
+            "PATH",
+            format!("{}:{}:/usr/bin:/bin", front.display(), sb.bin.display()),
+        )
         .env("SWAMP_CONFIG_DIR", &dir)
         .env("SWAMP_API_KEY", KEY)
         .spawn()
@@ -235,7 +276,11 @@ fn the_wrapper_on_path_as_swamp_reaches_the_real_swamp() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     assert!(status.success());
-    assert!(sb.reached().expect("real swamp not reached").starts_with("args=auth whoami\n"));
+    assert!(
+        sb.reached()
+            .expect("real swamp not reached")
+            .starts_with("args=auth whoami\n")
+    );
 }
 
 /// With `tools: [claude]`, `swamp repo init`/`upgrade` writes
@@ -248,8 +293,14 @@ fn swamp_is_enrolled_for_no_ai_tool() {
     let marker = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".swamp.yaml"))
         .expect("read .swamp.yaml");
     let lines: Vec<&str> = marker.lines().collect();
-    assert!(lines.contains(&"tools: []"), ".swamp.yaml must enroll no AI tool:\n{marker}");
-    assert!(lines.contains(&"telemetryDisabled: true"), ".swamp.yaml must keep telemetry off:\n{marker}");
+    assert!(
+        lines.contains(&"tools: []"),
+        ".swamp.yaml must enroll no AI tool:\n{marker}"
+    );
+    assert!(
+        lines.contains(&"telemetryDisabled: true"),
+        ".swamp.yaml must keep telemetry off:\n{marker}"
+    );
 }
 
 #[test]

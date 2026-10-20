@@ -29,7 +29,8 @@ fn repo() -> PathBuf {
 
 fn load(rel: &str) -> Value {
     let path = repo().join(rel);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
@@ -38,11 +39,17 @@ fn factory() -> Value {
 }
 
 fn stages() -> Vec<Value> {
-    factory()["globalArguments"]["stages"].as_array().expect("stages").clone()
+    factory()["globalArguments"]["stages"]
+        .as_array()
+        .expect("stages")
+        .clone()
 }
 
 fn stage(id: &str) -> Value {
-    stages().into_iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("no stage {id}"))
+    stages()
+        .into_iter()
+        .find(|s| s["id"] == id)
+        .unwrap_or_else(|| panic!("no stage {id}"))
 }
 
 /// Transitions out of `from` that lead to `to`.
@@ -54,16 +61,25 @@ fn transitions(from: &str, to: &str) -> Vec<Value> {
 }
 
 fn gates(from: &str, to: &str) -> Vec<Value> {
-    transitions(from, to).iter().map(|t| t["gates"].clone()).collect()
+    transitions(from, to)
+        .iter()
+        .map(|t| t["gates"].clone())
+        .collect()
 }
 
 /// The stage's system prompt with whitespace collapsed, as the YAML folds it.
 fn prompt(id: &str) -> String {
-    stage(id)["work"]["systemPrompt"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ")
+    stage(id)["work"]["systemPrompt"]
+        .as_str()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 const PLAN_SLUG: &str = r#"${{ data.latest(self.name, "artifact-plan").payload.changeSlug }}"#;
-const HEAD_SHA: &str = r#"${{ data.latest(self.name, "evidence-change-request").payload.headSha }}"#;
+const HEAD_SHA: &str =
+    r#"${{ data.latest(self.name, "evidence-change-request").payload.headSha }}"#;
 const BRANCH: &str = r#"${{ data.latest(self.name, "evidence-change-request").payload.branch }}"#;
 
 fn blocking_open(artifact: &str) -> String {
@@ -80,9 +96,18 @@ fn the_stage_graph_is_exactly_this() {
         .iter()
         .flat_map(|s| {
             let id = s["id"].as_str().unwrap().to_string();
-            s["transitions"].as_array().cloned().unwrap_or_default().into_iter().map(move |t| {
-                format!("{id} --{}--> {}", t["name"].as_str().unwrap(), t["to"].as_str().unwrap())
-            })
+            s["transitions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |t| {
+                    format!(
+                        "{id} --{}--> {}",
+                        t["name"].as_str().unwrap(),
+                        t["to"].as_str().unwrap()
+                    )
+                })
         })
         .collect();
     edges.sort();
@@ -120,7 +145,10 @@ fn the_stage_graph_is_exactly_this() {
     assert_eq!(edges, expected);
 
     let first = &stages()[0];
-    assert_eq!((first["id"].as_str(), first["initial"].as_bool()), (Some("intake"), Some(true)));
+    assert_eq!(
+        (first["id"].as_str(), first["initial"].as_bool()),
+        (Some("intake"), Some(true))
+    );
     for id in ["done", "aborted"] {
         assert_eq!(stage(id)["terminal"], json!(true), "{id} must be terminal");
     }
@@ -136,7 +164,10 @@ mod intake {
     #[test]
     fn the_work_item_is_a_github_issue_read_with_gh() {
         let text = prompt("intake");
-        assert!(text.contains("gh issue view ${{ self.workItem }} --repo JaysonRawlins/ecphory"), "{text}");
+        assert!(
+            text.contains("gh issue view ${{ self.workItem }} --repo JaysonRawlins/ecphory"),
+            "{text}"
+        );
         assert_eq!(stage("intake")["artifacts"][0]["name"], "issue-context");
         assert_eq!(
             gates("intake", "planning"),
@@ -160,11 +191,16 @@ mod plan {
     fn a_verified_change_goes_to_the_refute_with_no_human_gate_yet() {
         assert_eq!(
             gates("openspec-plan-verify", "plan-refute"),
-            vec![json!([{"type": "workflow-succeeded", "config": {"workflow": "openspec-plan-verify"}}])]
+            vec![
+                json!([{"type": "workflow-succeeded", "config": {"workflow": "openspec-plan-verify"}}])
+            ]
         );
         assert!(transitions("openspec-plan-verify", "implementing").is_empty());
         let verify = stage("openspec-plan-verify");
-        assert_eq!(verify["work"]["workflow"], json!({"name": "openspec-plan-verify", "inputs": {"changeSlug": PLAN_SLUG}}));
+        assert_eq!(
+            verify["work"]["workflow"],
+            json!({"name": "openspec-plan-verify", "inputs": {"changeSlug": PLAN_SLUG}})
+        );
     }
 
     #[test]
@@ -187,7 +223,10 @@ mod plan {
         assert_eq!(refute["maxCycles"], json!(2));
         assert_eq!(refute["work"]["mode"], "dispatch");
         assert_eq!(refute["work"]["skills"], json!(["plan-refute"]));
-        assert_eq!(refute["artifacts"], json!([{"name": "plan-refute", "kind": "findings", "reviews": "plan"}]));
+        assert_eq!(
+            refute["artifacts"],
+            json!([{"name": "plan-refute", "kind": "findings", "reviews": "plan"}])
+        );
         let text = prompt("plan-refute");
         assert!(text.contains(&format!("openspec/changes/{PLAN_SLUG}/")));
         assert!(text.contains("findings from an earlier cycle"));
@@ -224,7 +263,9 @@ mod implement {
     fn tasks_then_pre_pr_verification_gate_the_implementation() {
         assert_eq!(
             gates("openspec-tasks-verify", "pre-pr-verify"),
-            vec![json!([{"type": "workflow-succeeded", "config": {"workflow": "openspec-tasks-verify"}}])]
+            vec![
+                json!([{"type": "workflow-succeeded", "config": {"workflow": "openspec-tasks-verify"}}])
+            ]
         );
         let verify = stage("pre-pr-verify");
         assert_eq!(
@@ -234,7 +275,9 @@ mod implement {
         assert_eq!(verify["work"]["resultEvidence"], "verify-run");
         assert_eq!(
             gates("pre-pr-verify", "implementing"),
-            vec![json!([{"type": "evidence-recorded", "config": {"name": "verify-run", "requireField": {"status": "failed"}}}])]
+            vec![
+                json!([{"type": "evidence-recorded", "config": {"name": "verify-run", "requireField": {"status": "failed"}}}])
+            ]
         );
     }
 }
@@ -245,17 +288,34 @@ mod review {
     #[test]
     fn two_lanes_review_the_change_and_blocking_findings_send_it_back() {
         let review = stage("adversarial-review");
-        assert_eq!(review["work"]["skills"], json!(["architecture", "security-performance"]));
-        assert_eq!(review["artifacts"], json!([{"name": "adversarial-review", "kind": "findings", "reviews": "change-summary"}]));
+        assert_eq!(
+            review["work"]["skills"],
+            json!(["architecture", "security-performance"])
+        );
+        assert_eq!(
+            review["artifacts"],
+            json!([{"name": "adversarial-review", "kind": "findings", "reviews": "change-summary"}])
+        );
         let pass = &gates("adversarial-review", "live-verify")[0];
-        assert_eq!(pass[0], json!({"type": "artifact-fresh", "config": {"artifact": "adversarial-review", "recordedThisCycle": true}}));
+        assert_eq!(
+            pass[0],
+            json!({"type": "artifact-fresh", "config": {"artifact": "adversarial-review", "recordedThisCycle": true}})
+        );
         assert_eq!(
             pass[1],
             json!({"type": "findings-clear", "config": {"artifact": "adversarial-review", "blocking": ["critical", "high", "medium"]}})
         );
-        assert_eq!(pass[2]["config"]["expr"], "size(artifacts.adversarial_review.findings) >= 1");
+        assert_eq!(
+            pass[2]["config"]["expr"],
+            "size(artifacts.adversarial_review.findings) >= 1"
+        );
         let rework = &gates("adversarial-review", "implementing")[0];
-        let expr = rework[0]["config"]["expr"].as_str().unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+        let expr = rework[0]["config"]["expr"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(expr, blocking_open("adversarial_review"));
     }
 }
@@ -269,7 +329,10 @@ mod live {
         assert!(text.contains("\"## Live verification\""));
         let schema = &stage("live-verify")["evidence"][0];
         assert_eq!(schema["name"], "live-verification");
-        assert_eq!(schema["schema"]["required"], json!(["changeSlug", "headSha", "criteria"]));
+        assert_eq!(
+            schema["schema"]["required"],
+            json!(["changeSlug", "headSha", "criteria"])
+        );
     }
 
     // The live daemon is Jayson's real memory store, serving every agent
@@ -289,14 +352,23 @@ mod live {
         ] {
             assert!(text.contains(needle), "live-verify prompt lacks {needle:?}");
         }
-        assert!(!text.contains("deploy-daemon"), "live-verify must not deploy to the daemon");
+        assert!(
+            !text.contains("deploy-daemon"),
+            "live-verify must not deploy to the daemon"
+        );
     }
 
     #[test]
     fn live_verify_passes_or_is_waived_into_reconcile_and_never_straight_to_a_pr() {
         let into: Vec<Value> = transitions("live-verify", "reconcile");
-        let blocked = into.iter().find(|t| t["name"] == "blocked").expect("blocked");
-        assert_eq!(blocked["gates"][1], json!({"type": "human-approval", "config": {"id": "live-verification-waiver"}}));
+        let blocked = into
+            .iter()
+            .find(|t| t["name"] == "blocked")
+            .expect("blocked");
+        assert_eq!(
+            blocked["gates"][1],
+            json!({"type": "human-approval", "config": {"id": "live-verification-waiver"}})
+        );
         assert!(transitions("live-verify", "open-pr").is_empty());
     }
 }
@@ -308,13 +380,21 @@ mod archive {
     fn reconcile_reviews_every_touched_requirement_and_edits_nothing() {
         let reconcile = stage("reconcile");
         assert_eq!(reconcile["work"]["skills"], json!(["spec-reconcile"]));
-        assert_eq!(reconcile["artifacts"], json!([{"name": "reconcile", "kind": "findings", "reviews": "change-summary"}]));
+        assert_eq!(
+            reconcile["artifacts"],
+            json!([{"name": "reconcile", "kind": "findings", "reviews": "change-summary"}])
+        );
         let text = prompt("reconcile");
         assert!(text.contains("add, modify, remove or rename"));
         assert!(text.contains("every existing requirement under openspec/specs/"));
         assert!(text.contains("Do not edit any file"));
         let rework = &gates("reconcile", "implementing")[0];
-        let expr = rework[0]["config"]["expr"].as_str().unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+        let expr = rework[0]["config"]["expr"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(expr, blocking_open("reconcile"));
     }
 
@@ -329,7 +409,9 @@ mod archive {
         );
         assert_eq!(
             gates("openspec-archive-verify", "final-pre-pr-verify"),
-            vec![json!([{"type": "workflow-succeeded", "config": {"workflow": "openspec-archive-verify"}}])]
+            vec![
+                json!([{"type": "workflow-succeeded", "config": {"workflow": "openspec-archive-verify"}}])
+            ]
         );
     }
 
@@ -346,7 +428,11 @@ mod archive {
         assert_eq!(fin["work"]["resultEvidence"], "final-verify-run");
         let into: Vec<String> = stages()
             .iter()
-            .filter(|s| s["transitions"].as_array().is_some_and(|ts| ts.iter().any(|t| t["to"] == "open-pr")))
+            .filter(|s| {
+                s["transitions"]
+                    .as_array()
+                    .is_some_and(|ts| ts.iter().any(|t| t["to"] == "open-pr"))
+            })
             .map(|s| s["id"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(into, vec!["final-pre-pr-verify"]);
@@ -374,7 +460,10 @@ mod pr {
     #[test]
     fn the_run_ends_when_the_pr_merges_through_merge_pr() {
         assert!(prompt("in-review").contains("merge-pr"));
-        assert_eq!(gates("in-review", "done"), vec![json!([{"type": "evidence-recorded", "config": {"name": "pr-merged"}}])]);
+        assert_eq!(
+            gates("in-review", "done"),
+            vec![json!([{"type": "evidence-recorded", "config": {"name": "pr-merged"}}])]
+        );
         assert_eq!(
             gates("in-review", "implementing"),
             vec![json!([{"type": "human-approval", "config": {"id": "rework-approval"}}])]
@@ -388,9 +477,25 @@ mod adaptation {
     /// exman-specific machinery that must not leak into ecphory's factory.
     #[test]
     fn no_exman_machinery_remains() {
-        let text = std::fs::read_to_string(repo().join("models/@swamp/software-factory/ecphory-factory.yaml")).unwrap();
-        for needle in ["exman", "pnpm", "cdk", "attestation", "DSQL", "migration", "Datadog", "x-amzn", "vault.get"] {
-            assert!(!text.to_lowercase().contains(&needle.to_lowercase()), "factory still mentions {needle:?}");
+        let text = std::fs::read_to_string(
+            repo().join("models/@swamp/software-factory/ecphory-factory.yaml"),
+        )
+        .unwrap();
+        for needle in [
+            "exman",
+            "pnpm",
+            "cdk",
+            "attestation",
+            "DSQL",
+            "migration",
+            "Datadog",
+            "x-amzn",
+            "vault.get",
+        ] {
+            assert!(
+                !text.to_lowercase().contains(&needle.to_lowercase()),
+                "factory still mentions {needle:?}"
+            );
         }
     }
 
@@ -405,7 +510,15 @@ mod adaptation {
             .collect();
         named.sort();
         named.dedup();
-        assert_eq!(named, ["openspec-archive-verify", "openspec-plan-verify", "openspec-tasks-verify", "pre-pr-verify"]);
+        assert_eq!(
+            named,
+            [
+                "openspec-archive-verify",
+                "openspec-plan-verify",
+                "openspec-tasks-verify",
+                "pre-pr-verify"
+            ]
+        );
         for name in &named {
             let wf = load(&format!("workflows/workflow-{name}.yaml"));
             assert_eq!(wf["name"], name.as_str());
@@ -413,7 +526,11 @@ mod adaptation {
                 for step in job["steps"].as_array().unwrap() {
                     if let Some(model) = step["task"]["modelIdOrName"].as_str() {
                         let path = repo().join(format!("models/command/shell/{model}.yaml"));
-                        assert!(path.is_file(), "workflow {name} step {} runs missing model {model}", step["name"]);
+                        assert!(
+                            path.is_file(),
+                            "workflow {name} step {} runs missing model {model}",
+                            step["name"]
+                        );
                     }
                 }
             }

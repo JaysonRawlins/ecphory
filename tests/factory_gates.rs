@@ -50,7 +50,11 @@ impl Fixture {
         let fx = Fixture { dir };
         let change = fx.root().join("openspec/changes/demo");
         fs::create_dir_all(change.join("specs/demo-cap")).unwrap();
-        fs::write(fx.root().join("openspec/config.yaml"), "schema: spec-driven\n").unwrap();
+        fs::write(
+            fx.root().join("openspec/config.yaml"),
+            "schema: spec-driven\n",
+        )
+        .unwrap();
         fs::write(change.join("proposal.md"), PROPOSAL).unwrap();
         fs::write(change.join("tasks.md"), TASKS).unwrap();
         fs::write(change.join("specs/demo-cap/spec.md"), DELTA).unwrap();
@@ -67,13 +71,27 @@ impl Fixture {
     /// hook: they are throwaway test data, not commits to any real repo.
     fn git(&self, args: &[&str]) {
         let out = Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
-            .args(["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
             .args(args)
             .current_dir(self.root())
             .output()
             .expect("run git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn commit(&self, msg: &str) {
@@ -83,7 +101,9 @@ impl Fixture {
 
     fn tick_all(&self) {
         let tasks = self.root().join("openspec/changes/demo/tasks.md");
-        let body = fs::read_to_string(&tasks).unwrap().replace("- [ ]", "- [x]");
+        let body = fs::read_to_string(&tasks)
+            .unwrap()
+            .replace("- [ ]", "- [x]");
         fs::write(tasks, body).unwrap();
     }
 
@@ -93,11 +113,17 @@ impl Fixture {
             .current_dir(self.root())
             .output()
             .expect("openspec must be on PATH for the factory gate tests");
-        assert!(out.status.success(), "openspec {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "openspec {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn gate(&self, script: &str, args: &[&str]) -> Output {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/factory").join(script);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/factory")
+            .join(script);
         Command::new("bash")
             .arg(&path)
             .args(args)
@@ -116,7 +142,10 @@ fn assert_gate(out: &Output, pass: bool, why: &str, stderr_has: &str) {
         "{why}: rc={:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code()
     );
-    assert!(stderr.contains(stderr_has), "{why}: stderr lacks {stderr_has:?}: {stderr}");
+    assert!(
+        stderr.contains(stderr_has),
+        "{why}: stderr lacks {stderr_has:?}: {stderr}"
+    );
 }
 
 #[test]
@@ -139,8 +168,18 @@ fn tasks_gate_passes_once_every_task_is_ticked() {
 fn tasks_gate_fails_on_an_unknown_or_missing_change() {
     let fx = Fixture::new();
     fx.tick_all();
-    assert_gate(&fx.gate("check-tasks-complete.sh", &["nope"]), false, "unknown slug", "not found");
-    assert_gate(&fx.gate("check-tasks-complete.sh", &[]), false, "no slug", "usage");
+    assert_gate(
+        &fx.gate("check-tasks-complete.sh", &["nope"]),
+        false,
+        "unknown slug",
+        "not found",
+    );
+    assert_gate(
+        &fx.gate("check-tasks-complete.sh", &[]),
+        false,
+        "no slug",
+        "usage",
+    );
 }
 
 #[test]
@@ -167,8 +206,19 @@ impl Fixture {
     fn fill_purpose(&self) {
         let spec = self.root().join("openspec/specs/demo-cap/spec.md");
         let body = fs::read_to_string(&spec).unwrap();
-        let tbd = body.lines().find(|l| l.starts_with("TBD - created by archiving")).expect("TBD purpose").to_string();
-        fs::write(spec, body.replace(&tbd, "A demo capability, here only so the factory gate tests have a spec to merge.")).unwrap();
+        let tbd = body
+            .lines()
+            .find(|l| l.starts_with("TBD - created by archiving"))
+            .expect("TBD purpose")
+            .to_string();
+        fs::write(
+            spec,
+            body.replace(
+                &tbd,
+                "A demo capability, here only so the factory gate tests have a spec to merge.",
+            ),
+        )
+        .unwrap();
     }
 }
 
@@ -201,7 +251,9 @@ fn archive_gate_fails_when_the_merged_specs_are_not_strictly_valid() {
     fx.fill_purpose();
     // A requirement with no SHALL/MUST fails `openspec validate --specs --strict`.
     let spec = fx.root().join("openspec/specs/demo-cap/spec.md");
-    let body = fs::read_to_string(&spec).unwrap().replace("SHALL do", "does");
+    let body = fs::read_to_string(&spec)
+        .unwrap()
+        .replace("SHALL do", "does");
     fs::write(spec, body).unwrap();
     fx.commit("archive demo, then break the merged spec");
     let out = fx.gate("check-change-archived.sh", &["demo"]);
