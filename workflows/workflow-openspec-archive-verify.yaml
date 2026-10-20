@@ -1,0 +1,54 @@
+id: 84ec03e0-c9d5-43c7-8a72-6085c26aa1ad
+name: openspec-archive-verify
+description: >-
+  Fails unless the named OpenSpec change is archived and the archive committed
+  (no openspec/changes/<changeSlug>/, one archived copy, nothing uncommitted
+  under openspec/) and the merged specs pass `openspec validate --specs
+  --strict` (scripts/factory/check-change-archived.sh). Gates the factory's
+  archive stage.
+tags: {}
+inputs:
+  type: object
+  required: [changeSlug]
+  properties:
+    changeSlug:
+      type: string
+      description: The OpenSpec change name, as it was before archiving.
+jobs:
+  - name: verify
+    description: Check the change is archived, committed, and the specs strictly valid
+    steps:
+      - name: check-archived
+        description: scripts/factory/check-change-archived.sh <changeSlug>
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell
+          methodName: execute
+          inputs:
+            run: 'bash scripts/factory/check-change-archived.sh ${{ inputs.changeSlug }}'
+            # the paired assert is the gate, so the output survives (see plan-verify)
+            ignoreExitCode: true
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: assert-archived
+        description: check-change-archived.sh must exit 0
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: >-
+            the OpenSpec change is not archived and committed, or the merged
+            specs fail strict validation -- see the ecphory-shell result data
+          severity: high
+        dependsOn:
+          - step: check-archived
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

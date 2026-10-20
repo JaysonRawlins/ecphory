@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: cb8b5e4b-ec00-4b45-b18d-25cd3e0afcd3
+name: ecphory-shell-clippy
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

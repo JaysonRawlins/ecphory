@@ -1,0 +1,52 @@
+id: 72685bee-83ac-4eb9-879b-6fff52fb2cd2
+name: openspec-tasks-verify
+description: >-
+  Fails unless every task in the named OpenSpec change's tasks.md is checked off
+  (scripts/factory/check-tasks-complete.sh). Gates the factory's implementing
+  stage: the work is done when the change's own task list says so.
+tags: {}
+inputs:
+  type: object
+  required: [changeSlug]
+  properties:
+    changeSlug:
+      type: string
+      description: The OpenSpec change name (openspec/changes/<changeSlug>/).
+jobs:
+  - name: verify
+    description: Check every task in the change's tasks.md is complete
+    steps:
+      - name: check-tasks
+        description: scripts/factory/check-tasks-complete.sh <changeSlug>
+        task:
+          type: model_method
+          modelIdOrName: ecphory-shell
+          methodName: execute
+          inputs:
+            run: 'bash scripts/factory/check-tasks-complete.sh ${{ inputs.changeSlug }}'
+            # the paired assert is the gate, so the output survives (see plan-verify)
+            ignoreExitCode: true
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: assert-tasks-complete
+        description: check-tasks-complete.sh must exit 0
+        task:
+          type: assert
+          expr: >-
+            cel.bind(q, data.query('modelName == "ecphory-shell" && name == "result" &&
+            workflowRunId == "' + run.id + '" && version >= 0'),
+            size(q) > 0 && q.all(r, r.attributes.exitCode == 0))
+          message: >-
+            the OpenSpec change has unticked tasks -- see the ecphory-shell
+            result data for the done/total count
+          severity: high
+        dependsOn:
+          - step: check-tasks
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

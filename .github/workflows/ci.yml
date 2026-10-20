@@ -18,6 +18,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # tests/factory_gates.rs runs the real openspec CLI, and fails rather
+      # than skips without it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @fission-ai/openspec@1.6.0
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets -- -D warnings
 
