@@ -54,10 +54,17 @@
       (work) login before it was removed. Now `tools: []`, pinned, with
       telemetry off, and no swamp CLAUDE.md. `PATH_add scripts` in `.envrc`
       sends a bare `swamp` in any direnv shell to the wrapper.
-- [ ] 4.3 `workflow validate` for all four workflows. Run each live, red then
-      green: plan-verify on a broken and a valid change; tasks-verify with a
-      task unticked and ticked; archive-verify before and after the archive
-      commit; pre-pr-verify on a dirty tree and on this branch's head.
+- [x] 4.3 Live workflow runs, each red then green:
+      - plan-verify: rc=1 on a change that does not exist, rc=0 on this one.
+      - tasks-verify: rc=1 with "incomplete tasks: 9/12" while 4.x were open.
+      - archive-verify: rc=1 before the archive.
+      - pre-pr-verify: rc=1 on a dirty tree ("working tree not clean") and on
+        the previous sha ("HEAD is 985a29e…, not eaddc71…"). rc=0 on 985a29e:
+        8/8 steps, `{"tests":164,"failures":0,"ignored":0}`. The open-pr
+        stage's runId-scoped totals query and its report query both returned
+        that run's data.
+      The greens for tasks-verify, archive-verify and the final pre-pr-verify
+      run on the archive commit, after this task is ticked.
 
 ## Live verification
 
