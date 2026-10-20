@@ -23,6 +23,8 @@
 //! - the empty-key check: `an_empty_key_is_refused`
 //! - the hop marker: `direnv_gets_one_hop_and_cannot_loop`, "saw 3". Before
 //!   the fake direnv capped itself, this one hung instead of failing.
+//! - an `export SWAMP_API_KEY="<literal>"` line appended to `.envrc`: the
+//!   committed-envrc test.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -157,6 +159,35 @@ fn direnv_gets_one_hop_and_cannot_loop() {
     assert_refused(&sb, &out, "direnv loaded nothing");
     let hop_count = fs::read_to_string(&hops).map(|s| s.lines().count()).unwrap_or(0);
     assert_eq!(hop_count, 1, "expected exactly one direnv hop, saw {hop_count}");
+}
+
+/// `.envrc` is committed so every worktree loads the identity with no setup,
+/// which makes it a public file: the key must only ever come from Doppler.
+#[test]
+fn the_committed_envrc_reads_the_key_from_doppler_and_nowhere_else() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let tracked = Command::new("git")
+        .args(["ls-files", "--error-unmatch", ".envrc"])
+        .current_dir(&root)
+        .output()
+        .expect("run git");
+    assert!(tracked.status.success(), ".envrc must be committed so new worktrees get it");
+
+    let envrc = fs::read_to_string(root.join(".envrc")).expect("read .envrc");
+    assert!(envrc.contains("export SWAMP_CONFIG_DIR=\"$HOME/.config/swamp-personal\""));
+    let assignments: Vec<&str> = envrc
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.trim_start_matches("export ").starts_with("SWAMP_API_KEY="))
+        .collect();
+    assert!(!assignments.is_empty(), ".envrc no longer sets SWAMP_API_KEY");
+    for line in assignments {
+        assert!(
+            line.starts_with("SWAMP_API_KEY=\"$(doppler secrets get SWAMP_API_KEY "),
+            "SWAMP_API_KEY must come from Doppler, not: {line}"
+        );
+    }
 }
 
 #[test]

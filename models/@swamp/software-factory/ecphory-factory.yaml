@@ -5,7 +5,7 @@ name: ecphory-factory
 version: 1
 tags: {}
 # Stage graph and prompt rules are pinned by tests/factory_definition.rs.
-# Run swamp through scripts/swamp, never bare `swamp` (see .envrc.example).
+# Run swamp through scripts/swamp, never bare `swamp` (see .envrc).
 reports:
   require:
     - name: "@swamp/software-factory/work-item-summary"

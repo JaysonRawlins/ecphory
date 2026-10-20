@@ -24,7 +24,7 @@ machinery.
   strict spec validation, against a clean checkout of exactly the named commit.
 - **Gate scripts** under `scripts/factory/`: tasks complete, change archived and
   committed, and cargo test totals that fail on zero tests.
-- **`scripts/swamp`** and `.envrc.example`: swamp runs under the maintainer's own
+- **`scripts/swamp`** and a committed `.envrc`: swamp runs under the maintainer's own
   swamp-club identity, with the key read from Doppler through direnv, or not at
   all.
 - **Tests**: `factory_definition`, `factory_gates`, `factory_test_counts` and

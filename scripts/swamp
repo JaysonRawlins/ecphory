@@ -7,8 +7,8 @@
 # SWAMP_API_KEY is unset or empty. Setting only the key is not enough: with the
 # default config dir swamp writes the personal identity into that account's
 # auth.json. So both are required: SWAMP_CONFIG_DIR=~/.config/swamp-personal,
-# and a non-empty SWAMP_API_KEY, which .envrc reads from Doppler (see
-# .envrc.example). tests/factory_swamp_wrapper.rs pins every refusal below.
+# and a non-empty SWAMP_API_KEY, which the committed .envrc reads from
+# Doppler. tests/factory_swamp_wrapper.rs pins every refusal below.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +16,7 @@ personal="$HOME/.config/swamp-personal"
 
 refuse() {
   echo "scripts/swamp: refusing: $1" >&2
-  echo "scripts/swamp: cp .envrc.example .envrc && direnv allow, with SWAMP_API_KEY in Doppler (project swamp, config personal)" >&2
+  echo "scripts/swamp: direnv allow (or whitelist this checkout in direnv.toml), with SWAMP_API_KEY in Doppler (project swamp, config personal)" >&2
   exit 78
 }
 

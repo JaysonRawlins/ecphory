@@ -1,6 +1,6 @@
 ## 1. Identity
 
-- [x] 1.1 `scripts/swamp` wrapper, `.envrc.example`, `.envrc` git-ignored.
+- [x] 1.1 `scripts/swamp` wrapper, `.envrc` committed (no secret in it; pinned by a test).
 - [x] 1.2 Red proof: against a bare `exec swamp "$@"` stub, all six
       `factory_swamp_wrapper` tests failed. Each guard removed alone failed
       exactly its own test. The hop-marker mutation first HUNG the test, so the
