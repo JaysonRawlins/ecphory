@@ -174,6 +174,27 @@ mod intake {
             vec![json!([{"type": "artifact-exists", "config": {"artifact": "issue-context"}}])]
         );
     }
+
+    /// The swamp identity is the session's: a personal session starts under
+    /// `doppler run -p swamp -c personal`, and the employer login is out of
+    /// swamp's default config dir, so any other session is unauthenticated. A
+    /// session that still answers as someone else is stopped here, before the
+    /// issue is read. RED-PROOF, 2026-10-19: absent on a6f8195; dropping the
+    /// username printed `lacks "jaysonjrawlins"`; whoami moved after `gh issue
+    /// view` printed "does not check the swamp identity before reading".
+    #[test]
+    fn intake_checks_the_swamp_identity_before_reading_the_issue() {
+        let text = prompt("intake");
+        let whoami = text.find("swamp auth whoami --json");
+        let issue = text.find("gh issue view");
+        assert!(
+            matches!((whoami, issue), (Some(w), Some(i)) if w < i),
+            "intake does not check the swamp identity before reading the issue:\n{text}"
+        );
+        for want in ["jaysonjrawlins", "stop", "doppler run -p swamp -c personal"] {
+            assert!(text.contains(want), "intake identity check lacks {want:?}");
+        }
+    }
 }
 
 mod plan {
@@ -497,6 +518,49 @@ mod adaptation {
                 "factory still mentions {needle:?}"
             );
         }
+    }
+
+    /// The repo no longer routes swamp through a wrapper; the session carries
+    /// the identity, so every prompt and workflow says plain `swamp`.
+    #[test]
+    fn nothing_routes_swamp_through_a_wrapper() {
+        let mut files = vec![repo().join("models/@swamp/software-factory/ecphory-factory.yaml")];
+        for entry in std::fs::read_dir(repo().join("workflows")).unwrap() {
+            files.push(entry.unwrap().path());
+        }
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !text.contains("scripts/swamp") && !text.contains(".envrc"),
+                "{} still routes swamp through the wrapper",
+                path.display()
+            );
+        }
+        assert!(!repo().join("scripts/swamp").exists());
+        assert!(!repo().join(".envrc").exists());
+    }
+
+    /// With `tools: [claude]`, `swamp repo init`/`upgrade` writes
+    /// `.claude/settings.local.json` with a hook that runs `swamp audit record`
+    /// after every Bash call, under whatever identity that shell has. On
+    /// 2026-10-19 it ran 5 times as the wrong login before it was removed.
+    /// `tools: []` makes swamp write no Claude settings and no CLAUDE.md.
+    /// RED-PROOF: moved here from the deleted factory_swamp_wrapper.rs and
+    /// re-observed 2026-10-19: `.swamp.yaml` back to `tools: [claude]` fails
+    /// it. Live, `swamp repo upgrade` in a throwaway dir wrote both files with
+    /// that and neither without (observed when it was first added).
+    #[test]
+    fn swamp_is_enrolled_for_no_ai_tool() {
+        let marker = std::fs::read_to_string(repo().join(".swamp.yaml")).expect("read .swamp.yaml");
+        let lines: Vec<&str> = marker.lines().collect();
+        assert!(
+            lines.contains(&"tools: []"),
+            ".swamp.yaml must enroll no AI tool:\n{marker}"
+        );
+        assert!(
+            lines.contains(&"telemetryDisabled: true"),
+            ".swamp.yaml must keep telemetry off:\n{marker}"
+        );
     }
 
     /// swamp's validate checks neither of these: a workflow the factory names,

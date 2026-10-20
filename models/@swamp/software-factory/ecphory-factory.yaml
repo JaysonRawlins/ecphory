@@ -5,7 +5,8 @@ name: ecphory-factory
 version: 1
 tags: {}
 # Stage graph and prompt rules are pinned by tests/factory_definition.rs.
-# Run swamp through scripts/swamp, never bare `swamp` (see .envrc).
+# swamp runs as the session's identity: start the session under
+# `doppler run -p swamp -c personal -- claude`. intake checks it first.
 reports:
   require:
     - name: "@swamp/software-factory/work-item-summary"
@@ -20,7 +21,13 @@ globalArguments:
       work:
         mode: interactive
         systemPrompt: >-
-          Run `gh issue view ${{ self.workItem }} --repo JaysonRawlins/ecphory
+          First run `swamp auth whoami --json`. Unless it is authenticated as
+          the maintainer's personal account, jaysonjrawlins, stop and tell the
+          operator: this repo's runs belong to that account, and the session
+          must be started under `doppler run -p swamp -c personal -- claude`
+          (or each call prefixed with `doppler run -p swamp -c personal --`).
+          Never run `swamp auth login`. Then run
+          `gh issue view ${{ self.workItem }} --repo JaysonRawlins/ecphory
           --json number,title,body,url,labels` and record the issue-context
           artifact from it, with labels as a list of label names. If the issue
           is closed or does not exist, stop and tell the operator instead of
@@ -716,7 +723,7 @@ globalArguments:
           for the run recorded in final-verify-run evidence, because the newest
           row can belong to another run and, without `version >= 0`, swamp
           searches only the newest version. For the suite line, take the last
-          line of this run's test step output (`scripts/swamp data query
+          line of this run's test step output (`swamp data query
           'modelName == "ecphory-shell-test" && name == "result" &&
           workflowRunId == "<the runId recorded in final-verify-run evidence>"
           && version >= 0' --select attributes.stdout --json`), the
@@ -726,7 +733,7 @@ globalArguments:
           evidence, probe, observedAt) in a `<details><summary>Live
           verification</summary>` block, and the @swamp/verification-summary
           report for that run, verbatim, in a `<details><summary>Verification
-          report</summary>` block (find it with `scripts/swamp data query
+          report</summary>` block (find it with `swamp data query
           'modelType == "workflow" && modelName == "pre-pr-verify" && name ==
           "report-swamp-verification-summary" && version >= 0'`, take the one
           that names this run's head sha, and never embed an error report).
